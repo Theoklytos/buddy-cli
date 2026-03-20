@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.venv/
+.claude/
+*.faiss
+*.bak.faiss
+*_metadata.jsonl
+*.tmp
