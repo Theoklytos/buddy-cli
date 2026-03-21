@@ -45,8 +45,8 @@ conversations_*.json  ──►  parse  ──►  discover  ──►  chunk  �
 
 ```bash
 # Clone and install
-git clone https://github.com/YOUR_USERNAME/bud-rag.git
-cd bud-rag
+git clone https://github.com/Theoklytos/buddy-cli.git
+cd buddy-cli
 make dev            # creates .venv, installs with dev deps
 
 # Configure (sets data dir, output dir, LLM/embedding models)
@@ -91,6 +91,7 @@ bash install.sh --dev
 | `bud query "text"` | Semantic search with LLM-generated answer |
 | `bud status` | Show pipeline and index status |
 | `bud models` | List supported embedding models |
+| `bud update` | Pull latest code and sync dependencies |
 
 ### Key Flags
 
@@ -101,6 +102,23 @@ bash install.sh --dev
 --blend                Cross-boundary sampling mode (in bud discover)
 --progressive          Exhaustive cursor-based sampling (in bud discover)
 ```
+
+## Input Format
+
+Bud expects **Claude conversation exports** — the JSON files you can download from [claude.ai](https://claude.ai) via Settings → Export Data. Each file contains one or more conversations with the structure:
+
+```json
+[{
+  "chat_messages": [
+    {"sender": "human", "content": [{"type": "text", "text": "..."}]},
+    {"sender": "assistant", "content": [{"type": "text", "text": "..."}]}
+  ]
+}]
+```
+
+Place your exported `conversations_*.json` files in your configured `data_dir` before running the pipeline.
+
+> Support for other export formats (ChatGPT, etc.) is not currently implemented.
 
 ## Architecture
 
@@ -193,6 +211,10 @@ make test-fast           # quick run (pytest -q)
 ```
 
 All tests mock external services. No running LLM or Ollama required.
+
+## Origin
+
+Bud was built on a Samsung Galaxy running [Termux](https://termux.dev), using a Claude Pro account and a mix of free cloud services and local models running on native Android hardware. The author is a carpenter with a deep interest in AI — not a software engineer. The project grew through iterative prompting: a human with a clear vision of what they needed, and a model doing the implementation. It exists because the right tool for the job didn't.
 
 ## License
 

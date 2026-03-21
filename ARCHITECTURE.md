@@ -343,11 +343,16 @@
    |
    +-- configure    Interactive setup wizard
    +-- models       List supported embedding models
+   +-- parse        Parse raw conversation JSON into JSONL
    +-- discover     Pattern discovery (optional pre-step)
    |    +-- --blend          Cross-boundary sampling
    |    +-- --progressive    Exhaustive cursor-based
    |    +-- --resume         Continue from last run
    |    +-- --stability 0.75 Early-stop threshold
+   +-- chunk [N]    Standalone iterative chunking (N passes)
+   |    +-- --concurrency N  Parallel LLM requests
+   |    +-- --stability 0.75 Early-stop threshold
+   |    +-- --prompt NAME    conversational|factual|mythic|synthesis
    +-- process      Full pipeline (parse -> chunk -> embed)
    |    +-- --resume         Skip completed batches
    |    +-- --batch-size 50  Conversations per batch
@@ -356,4 +361,6 @@
    +-- query TEXT   Semantic search + LLM answer
    |    +-- --k 5           Top-k results
    +-- status       Show pipeline & index status
+   +-- update       Pull latest code, sync dependencies
+        +-- --dev            Include dev dependencies
 ```
