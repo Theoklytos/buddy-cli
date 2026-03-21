@@ -47,3 +47,19 @@ def validate_chunks(chunks: list[dict], num_turns: int) -> dict:
         "out_of_bounds": oob,
         "non_contiguous_chunks": non_contiguous,
     }
+
+
+def compute_structural_score(validation: dict) -> float:
+    """Convert a validation report into a 0-1 structural quality score.
+
+    Args:
+        validation: Dict from validate_chunks().
+
+    Returns:
+        Float between 0.0 and 1.0.
+    """
+    coverage = validation["coverage_ratio"]
+    overlap_penalty = min(1.0, len(validation["overlapping_turns"]) * 0.05)
+    gap_penalty = min(1.0, len(validation["missing_turns"]) * 0.02)
+    oob_penalty = min(1.0, len(validation["out_of_bounds"]) * 0.1)
+    return round(max(0.0, coverage - overlap_penalty - gap_penalty - oob_penalty), 4)
