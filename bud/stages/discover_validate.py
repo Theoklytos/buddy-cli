@@ -93,6 +93,79 @@ def compute_discovery_score(
     return round(max(0.0, base), 4)
 
 
+def analyze_chunk_feedback(chunks: list[dict], map_data: dict) -> dict:
+    """Analyze chunk output to measure discovery map effectiveness.
+
+    Args:
+        chunks: List of chunk dicts (from chunks.jsonl).
+        map_data: Discovery map data dict.
+
+    Returns:
+        Dict with archetype_usage, signal_effectiveness, gap_analysis,
+        motif_distribution, evidence_score.
+    """
+    if not chunks:
+        return {
+            "archetype_usage": {"used": {}, "unused": [], "unknown": {}},
+            "signal_effectiveness": {"referenced": {}, "dead": []},
+            "gap_analysis": {"total_gap_chunks": 0, "gap_ratio": 0.0},
+            "motif_distribution": {},
+            "evidence_score": 0.0,
+        }
+
+    # Archetype usage
+    type_counts: dict[str, int] = {}
+    for chunk in chunks:
+        ct = chunk.get("chunk_type", "exchange")
+        type_counts[ct] = type_counts.get(ct, 0) + 1
+
+    map_archetypes = set(map_data.get("chunk_archetypes", []))
+    used = {k: v for k, v in type_counts.items() if k in map_archetypes}
+    unused = sorted(map_archetypes - set(type_counts.keys()))
+    unknown = {k: v for k, v in type_counts.items()
+               if k not in map_archetypes and k != "stasis-pulse"}
+
+    # Signal effectiveness
+    signals = map_data.get("boundary_signals", [])
+    rationales = " ".join(
+        chunk.get("split_rationale", "").lower() for chunk in chunks
+    )
+    referenced: dict[str, int] = {}
+    for signal in signals:
+        if signal.lower() in rationales:
+            count = rationales.count(signal.lower())
+            referenced[signal] = count
+    dead = [s for s in signals if s not in referenced]
+
+    # Gap analysis
+    gap_chunks = [c for c in chunks if c.get("chunk_type") == "stasis-pulse"]
+    gap_ratio = len(gap_chunks) / max(1, len(chunks))
+
+    # Motif distribution
+    motif_counts: dict[str, int] = {}
+    for chunk in chunks:
+        motifs = chunk.get("tags", {}).get("motifs", [])
+        if isinstance(motifs, list):
+            for m in motifs:
+                motif_counts[m] = motif_counts.get(m, 0) + 1
+
+    # Evidence score
+    archetype_ratio = len(used) / max(1, len(used) + len(unused))
+    signal_ratio = len(referenced) / max(1, len(signals))
+    gap_penalty = 1 - gap_ratio
+    evidence = round(
+        0.4 * archetype_ratio + 0.4 * signal_ratio + 0.2 * gap_penalty, 4
+    )
+
+    return {
+        "archetype_usage": {"used": used, "unused": unused, "unknown": unknown},
+        "signal_effectiveness": {"referenced": referenced, "dead": dead},
+        "gap_analysis": {"total_gap_chunks": len(gap_chunks), "gap_ratio": round(gap_ratio, 4)},
+        "motif_distribution": motif_counts,
+        "evidence_score": evidence,
+    }
+
+
 def compact_map(map_data: dict, similarity_threshold: float = 0.7) -> dict:
     """Merge near-duplicates and deduplicate observations in place.
 

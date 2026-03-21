@@ -2,6 +2,53 @@
 from bud.stages.discover_validate import find_near_duplicates, dedup_observations
 from bud.stages.discover_validate import validate_discovery_map, compute_discovery_score
 from bud.stages.discover_validate import compact_map
+from bud.stages.discover_validate import analyze_chunk_feedback
+
+SAMPLE_MAP_DATA = {
+    "boundary_signals": ["topic change", "long silence", "hard no"],
+    "coherence_anchors": ["shared metaphor"],
+    "chunk_archetypes": ["exchange", "deep-dive", "meta-reflection"],
+    "anti_patterns": ["splitting mid-thought"],
+    "observations": [],
+}
+
+SAMPLE_CHUNKS = [
+    {"chunk_type": "exchange", "tags": {"motifs": ["identity"]},
+     "split_rationale": "topic change detected"},
+    {"chunk_type": "exchange", "tags": {"motifs": ["identity", "becoming"]},
+     "split_rationale": "natural pause"},
+    {"chunk_type": "deep-dive", "tags": {"motifs": ["resonance"]},
+     "split_rationale": "long silence marks shift"},
+    {"chunk_type": "stasis-pulse", "tags": {"motifs": ["stasis-pulse"]},
+     "split_rationale": "auto-fill: turns not assigned by LLM"},
+]
+
+
+def test_archetype_usage():
+    feedback = analyze_chunk_feedback(SAMPLE_CHUNKS, SAMPLE_MAP_DATA)
+    assert "exchange" in feedback["archetype_usage"]["used"]
+    assert "meta-reflection" in feedback["archetype_usage"]["unused"]
+
+
+def test_signal_effectiveness():
+    feedback = analyze_chunk_feedback(SAMPLE_CHUNKS, SAMPLE_MAP_DATA)
+    assert "topic change" in feedback["signal_effectiveness"]["referenced"]
+    assert "hard no" in feedback["signal_effectiveness"]["dead"]
+
+
+def test_gap_analysis():
+    feedback = analyze_chunk_feedback(SAMPLE_CHUNKS, SAMPLE_MAP_DATA)
+    assert feedback["gap_analysis"]["total_gap_chunks"] == 1
+
+
+def test_evidence_score_range():
+    feedback = analyze_chunk_feedback(SAMPLE_CHUNKS, SAMPLE_MAP_DATA)
+    assert 0.0 <= feedback["evidence_score"] <= 1.0
+
+
+def test_empty_chunks():
+    feedback = analyze_chunk_feedback([], SAMPLE_MAP_DATA)
+    assert feedback["evidence_score"] == 0.0
 
 
 _SIGNAL_POOL = [
