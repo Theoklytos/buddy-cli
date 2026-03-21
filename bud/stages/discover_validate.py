@@ -91,3 +91,54 @@ def compute_discovery_score(
     if chunk_evidence_score is not None:
         return round(max(0.0, base * 0.5 + chunk_evidence_score * 0.5), 4)
     return round(max(0.0, base), 4)
+
+
+def compact_map(map_data: dict, similarity_threshold: float = 0.7) -> dict:
+    """Merge near-duplicates and deduplicate observations in place.
+
+    Args:
+        map_data: Discovery map data dict (mutated in place).
+        similarity_threshold: Minimum similarity to merge.
+
+    Returns:
+        Report dict with duplicates_merged, observations_deduped,
+        items_before, items_after.
+    """
+    list_keys = ("boundary_signals", "coherence_anchors", "chunk_archetypes", "anti_patterns")
+    items_before = sum(len(map_data.get(k, [])) for k in list_keys)
+    total_merged = 0
+
+    for key in list_keys:
+        items = map_data.get(key, [])
+        if len(items) < 2:
+            continue
+        dupes = find_near_duplicates(items, threshold=similarity_threshold)
+        if not dupes:
+            continue
+        # Collect indices to remove (keep shorter/more general string)
+        to_remove: set[int] = set()
+        for idx_a, idx_b, _sim in dupes:
+            if idx_a in to_remove or idx_b in to_remove:
+                continue
+            # Keep the shorter one (more general)
+            if len(items[idx_a]) <= len(items[idx_b]):
+                to_remove.add(idx_b)
+            else:
+                to_remove.add(idx_a)
+        map_data[key] = [item for i, item in enumerate(items) if i not in to_remove]
+        total_merged += len(to_remove)
+
+    # Dedup observations
+    observations = map_data.get("observations", [])
+    deduped = dedup_observations(observations)
+    obs_removed = len(observations) - len(deduped)
+    map_data["observations"] = deduped
+
+    items_after = sum(len(map_data.get(k, [])) for k in list_keys)
+
+    return {
+        "duplicates_merged": total_merged,
+        "observations_deduped": obs_removed,
+        "items_before": items_before,
+        "items_after": items_after,
+    }

@@ -1,6 +1,7 @@
 # tests/test_discover_validate.py
 from bud.stages.discover_validate import find_near_duplicates, dedup_observations
 from bud.stages.discover_validate import validate_discovery_map, compute_discovery_score
+from bud.stages.discover_validate import compact_map
 
 
 _SIGNAL_POOL = [
@@ -169,3 +170,34 @@ def test_dedup_observations_keeps_highest_confidence():
 
 def test_dedup_observations_empty():
     assert dedup_observations([]) == []
+
+
+def test_compact_merges_near_duplicates():
+    map_data = _make_map_data()
+    map_data["boundary_signals"] = [
+        "fractal narrowing at the system boundary",
+        "fractal narrowing at the system boundary edge",
+        "something completely and utterly unrelated",
+    ]
+    report = compact_map(map_data)
+    assert report["duplicates_merged"] > 0
+    assert len(map_data["boundary_signals"]) == 2  # merged to 2
+
+
+def test_compact_deduplicates_observations():
+    map_data = _make_map_data()
+    map_data["observations"] = [
+        {"pattern_type": "boundary", "name": "rupture", "description": "v1", "confidence": 0.7},
+        {"pattern_type": "boundary", "name": "rupture", "description": "v2", "confidence": 0.9},
+    ]
+    report = compact_map(map_data)
+    assert report["observations_deduped"] == 1
+    assert len(map_data["observations"]) == 1
+    assert map_data["observations"][0]["confidence"] == 0.9
+
+
+def test_compact_noop_on_clean_map():
+    map_data = _make_map_data()
+    report = compact_map(map_data)
+    assert report["duplicates_merged"] == 0
+    assert report["items_before"] == report["items_after"]
