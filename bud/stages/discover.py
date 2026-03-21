@@ -119,21 +119,28 @@ class DiscoveryMap:
         self._data["iterations_completed"] = self._data.get("iterations_completed", 0) + 1
         self._data["version"] = self._data.get("version", 1) + 1
 
-    def to_summary(self) -> str:
-        """Compact JSON summary for injection into chunking system prompts."""
-        return json.dumps(
-            {
-                "boundary_signals": self._data.get("boundary_signals", []),
-                "coherence_anchors": self._data.get("coherence_anchors", []),
-                "chunk_archetypes": self._data.get("chunk_archetypes", []),
-                "anti_patterns": self._data.get("anti_patterns", []),
-            },
-            indent=2,
-        )
+    def to_summary(self, max_per_category: int = 0) -> str:
+        """Compact JSON summary for injection into chunking system prompts.
+
+        Args:
+            max_per_category: If > 0, cap each list to this many items.
+                Default 0 means no cap (backward-compatible).
+        """
+        data = {}
+        for key in ("boundary_signals", "coherence_anchors", "chunk_archetypes", "anti_patterns"):
+            items = self._data.get(key, [])
+            if max_per_category > 0:
+                items = items[:max_per_category]
+            data[key] = items
+        return json.dumps(data, indent=2)
 
     @property
     def stability_score(self) -> float:
-        return float(self._data.get("stability_score", 0.0))
+        subjective = float(self._data.get("stability_score", 0.0))
+        objective = self._data.get("objective_score")
+        if objective is not None:
+            return round(0.5 * subjective + 0.5 * float(objective), 4)
+        return subjective
 
     @property
     def iterations_completed(self) -> int:
@@ -400,5 +407,14 @@ def run_discovery(
 
         if concept_map.stability_score >= stability_threshold:
             break
+
+    # Post-loop: compact map and compute objective score
+    from bud.stages.discover_validate import (
+        compact_map, validate_discovery_map, compute_discovery_score,
+    )
+    compact_map(concept_map.data)
+    validation = validate_discovery_map(concept_map.data)
+    concept_map.data["objective_score"] = compute_discovery_score(validation)
+    concept_map.save()
 
     return concept_map

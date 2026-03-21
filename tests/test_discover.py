@@ -148,6 +148,35 @@ class TestDiscoveryMap:
         assert "observations" not in summary_dict
         assert "stability_score" not in summary_dict
 
+    def test_stability_score_composite_with_objective(self, tmp_path):
+        dm = DiscoveryMap(str(tmp_path / "map.json"))
+        dm._data["stability_score"] = 0.6
+        dm._data["objective_score"] = 0.9
+        # Composite: 0.5 * 0.6 + 0.5 * 0.9 = 0.75
+        assert abs(dm.stability_score - 0.75) < 0.01
+
+    def test_stability_score_without_objective(self, tmp_path):
+        dm = DiscoveryMap(str(tmp_path / "map.json"))
+        dm._data["stability_score"] = 0.7
+        # No objective_score: returns raw EMA
+        assert abs(dm.stability_score - 0.7) < 0.01
+
+    def test_to_summary_with_cap(self, tmp_path):
+        dm = DiscoveryMap(str(tmp_path / "map.json"))
+        dm._data["boundary_signals"] = [f"signal-{i}" for i in range(50)]
+        dm._data["coherence_anchors"] = [f"anchor-{i}" for i in range(50)]
+        dm._data["chunk_archetypes"] = [f"type-{i}" for i in range(50)]
+        dm._data["anti_patterns"] = [f"anti-{i}" for i in range(50)]
+        summary = json.loads(dm.to_summary(max_per_category=10))
+        assert len(summary["boundary_signals"]) == 10
+        assert len(summary["coherence_anchors"]) == 10
+
+    def test_to_summary_default_uncapped(self, tmp_path):
+        dm = DiscoveryMap(str(tmp_path / "map.json"))
+        dm._data["boundary_signals"] = [f"signal-{i}" for i in range(50)]
+        summary = json.loads(dm.to_summary())
+        assert len(summary["boundary_signals"]) == 50  # default: no cap
+
 
 # ---------------------------------------------------------------------------
 # _sample_conversations tests
