@@ -136,9 +136,10 @@ def _sample_chunks(chunks: list[dict], n: int = 8) -> list[dict]:
 
 def _format_chunks_for_review(chunks: list[dict]) -> str:
     """Format chunks for the review LLM prompt."""
+    from bud.stages.chunk import _truncate_at_boundary
     parts = []
     for i, c in enumerate(chunks, 1):
-        text_preview = c.get("text", "")[:400]
+        text_preview = _truncate_at_boundary(c.get("text", ""), 400)
         tags = c.get("tags", {})
         parts.append(
             f"--- chunk {i} ---\n"

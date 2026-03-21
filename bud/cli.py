@@ -577,7 +577,16 @@ def chunk(iterations, data_dir, output_dir, stability, prompt, batch_size, concu
     if batch_size > 0:
         all_conversations = all_conversations[:batch_size]
 
-    console.print(f"[green]✓ {len(all_conversations)} conversations loaded[/green]\n")
+    from bud.stages.chunk import estimate_tokens
+    total_tokens = sum(
+        estimate_tokens(t["text"])
+        for conv in all_conversations
+        for t in conv.get("turns", [])
+    )
+    console.print(
+        f"[green]✓ {len(all_conversations)} conversations loaded  |  "
+        f"~{total_tokens:,} tokens[/green]\n"
+    )
 
     # Initialize LLM and prompt
     from bud.lib.llm import LLMClient
@@ -1460,6 +1469,49 @@ def status(output_dir):
         console.print("\n[red]Configuration errors:[/red]")
         for error in errors:
             console.print(f"  - {error}")
+
+
+@main.command()
+@click.option("--dev", is_flag=True, help="Include dev dependencies (pytest etc.)")
+def update(dev):
+    """Pull the latest code and sync dependencies.
+
+    \b
+    Equivalent to:
+      git pull
+      pip install -e .
+    """
+    import subprocess
+    import sys
+    from rich.console import Console
+
+    console = Console()
+    console.print("\n[bold cyan]Bud — Update[/bold cyan]\n")
+
+    repo_dir = Path(__file__).parent.parent.resolve()
+
+    # Git pull
+    console.print("[dim]Pulling latest changes...[/dim]")
+    result = subprocess.run(
+        ["git", "pull"],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        console.print("[red]✗ git pull failed — check the output above.[/red]")
+        raise SystemExit(result.returncode)
+
+    # Sync dependencies
+    extras = "[dev]" if dev else ""
+    console.print(f"\n[dim]Syncing dependencies (pip install -e .{extras})...[/dim]")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", f".{extras}", "--quiet"],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        console.print("[red]✗ pip install failed — check the output above.[/red]")
+        raise SystemExit(result.returncode)
+
+    console.print("\n[green]✓ bud is up to date.[/green]\n")
 
 
 if __name__ == "__main__":
