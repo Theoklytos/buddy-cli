@@ -1471,5 +1471,48 @@ def status(output_dir):
             console.print(f"  - {error}")
 
 
+@main.command()
+@click.option("--dev", is_flag=True, help="Include dev dependencies (pytest etc.)")
+def update(dev):
+    """Pull the latest code and sync dependencies.
+
+    \b
+    Equivalent to:
+      git pull
+      pip install -e .
+    """
+    import subprocess
+    import sys
+    from rich.console import Console
+
+    console = Console()
+    console.print("\n[bold cyan]Bud — Update[/bold cyan]\n")
+
+    repo_dir = Path(__file__).parent.parent.resolve()
+
+    # Git pull
+    console.print("[dim]Pulling latest changes...[/dim]")
+    result = subprocess.run(
+        ["git", "pull"],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        console.print("[red]✗ git pull failed — check the output above.[/red]")
+        raise SystemExit(result.returncode)
+
+    # Sync dependencies
+    extras = "[dev]" if dev else ""
+    console.print(f"\n[dim]Syncing dependencies (pip install -e .{extras})...[/dim]")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", f".{extras}", "--quiet"],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        console.print("[red]✗ pip install failed — check the output above.[/red]")
+        raise SystemExit(result.returncode)
+
+    console.print("\n[green]✓ bud is up to date.[/green]\n")
+
+
 if __name__ == "__main__":
     main()
