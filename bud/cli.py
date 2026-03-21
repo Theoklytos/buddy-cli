@@ -577,7 +577,16 @@ def chunk(iterations, data_dir, output_dir, stability, prompt, batch_size, concu
     if batch_size > 0:
         all_conversations = all_conversations[:batch_size]
 
-    console.print(f"[green]✓ {len(all_conversations)} conversations loaded[/green]\n")
+    from bud.stages.chunk import estimate_tokens
+    total_tokens = sum(
+        estimate_tokens(t["text"])
+        for conv in all_conversations
+        for t in conv.get("turns", [])
+    )
+    console.print(
+        f"[green]✓ {len(all_conversations)} conversations loaded  |  "
+        f"~{total_tokens:,} tokens[/green]\n"
+    )
 
     # Initialize LLM and prompt
     from bud.lib.llm import LLMClient
