@@ -130,3 +130,45 @@ def test_chunk_records_prompt_preset():
         prompt="sys", prompt_preset="mythic",
     )
     assert chunks[0]["prompt_preset"] == "mythic"
+
+
+def test_chunk_conversation_repairs_overlapping_turns():
+    overlapping_response = json.dumps({
+        "chunks": [
+            {"turns": [0, 1], "tags": {"geometry": "linear", "coherence": "tight",
+             "texture": "raw", "terrain": "conceptual", "motifs": ["identity"]},
+             "chunk_type": "exchange", "split_rationale": "a"},
+            {"turns": [1], "tags": {"geometry": "linear", "coherence": "tight",
+             "texture": "raw", "terrain": "conceptual", "motifs": ["identity"]},
+             "chunk_type": "exchange", "split_rationale": "b"},
+        ],
+        "schema_proposals": []
+    })
+    llm = MagicMock()
+    llm.complete.return_value = overlapping_response
+    chunks = chunk_conversation(SAMPLE_CONVERSATION, SAMPLE_SCHEMA, llm, PIPELINE_CONFIG, "system")
+    all_turns = []
+    for c in chunks:
+        all_turns.extend(c["turns"])
+    from collections import Counter
+    counts = Counter(all_turns)
+    assert all(v == 1 for v in counts.values()), f"Overlaps remain: {counts}"
+
+
+def test_chunk_conversation_fills_gaps():
+    gappy_response = json.dumps({
+        "chunks": [
+            {"turns": [0], "tags": {"geometry": "linear", "coherence": "tight",
+             "texture": "raw", "terrain": "conceptual", "motifs": ["identity"]},
+             "chunk_type": "exchange", "split_rationale": "first only"},
+        ],
+        "schema_proposals": []
+    })
+    llm = MagicMock()
+    llm.complete.return_value = gappy_response
+    chunks = chunk_conversation(SAMPLE_CONVERSATION, SAMPLE_SCHEMA, llm, PIPELINE_CONFIG, "system")
+    all_turns = set()
+    for c in chunks:
+        all_turns.update(c["turns"])
+    expected = set(range(len(SAMPLE_CONVERSATION["turns"])))
+    assert all_turns == expected, f"Gaps remain: {expected - all_turns}"

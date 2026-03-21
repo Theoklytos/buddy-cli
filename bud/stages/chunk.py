@@ -3,7 +3,16 @@
 import json
 import uuid as uuid_lib
 
+from bud.stages.chunk_validate import validate_chunks, repair_chunks
+
 CHUNK_USER_TEMPLATE = """Conversation: {name}
+Total turns: {num_turns} (indices 0 to {max_turn_index})
+
+CRITICAL STRUCTURAL RULES:
+1. Every turn index from 0 to {max_turn_index} must appear in EXACTLY one chunk. No gaps. No overlaps.
+2. Turn indices within each chunk must be CONTIGUOUS (e.g., [3,4,5] not [3,5,7]).
+3. Chunks must follow the linear order of the conversation. Do not group by topic across distant turns.
+
 Turns:
 {turns_text}
 
@@ -121,6 +130,53 @@ def _build_fallback_chunks(conversation: dict, prompt_preset: str) -> list[dict]
     return chunks
 
 
+def _post_process_chunks(
+    raw_chunks: list[dict],
+    proposals: list[dict],
+    conversation: dict,
+    min_tok: int,
+    prompt_preset: str,
+    schema_version: int,
+) -> list[dict]:
+    """Build chunk dicts from LLM output, validate, and repair."""
+    turns = conversation["turns"]
+    chunks = []
+
+    for i, rc in enumerate(raw_chunks):
+        turn_indices = rc.get("turns", [])
+        turn_texts = [turns[j]["text"] for j in turn_indices if j < len(turns)]
+        text = " ".join(turn_texts)
+        tok_count = estimate_tokens(text)
+
+        if tok_count < min_tok and len(raw_chunks) > 1:
+            continue
+        chunk = {
+            "chunk_id": str(uuid_lib.uuid4()),
+            "conversation_id": conversation["id"],
+            "source_file": conversation["source_file"],
+            "text": text,
+            "turns": turn_indices,
+            "tags": rc.get("tags", {}),
+            "chunk_type": rc.get("chunk_type", "exchange"),
+            "split_rationale": rc.get("split_rationale", ""),
+            "schema_version": schema_version,
+            "llm_failure": False,
+            "prompt_preset": prompt_preset,
+            "schema_proposals": proposals if i == 0 else [],
+        }
+        chunks.append(chunk)
+
+    if not chunks:
+        return _build_fallback_chunks(conversation, prompt_preset)
+
+    # Validate and repair
+    validation = validate_chunks(chunks, len(turns))
+    if not validation["is_valid"]:
+        chunks = repair_chunks(chunks, len(turns), conversation)
+
+    return chunks
+
+
 def chunk_conversation(
     conversation: dict,
     schema: dict,
@@ -162,6 +218,8 @@ def chunk_conversation(
     dims = schema["dimensions"]
     user_msg = CHUNK_USER_TEMPLATE.format(
         name=conversation.get("conversation_name", "(unnamed)"),
+        num_turns=len(conversation["turns"]),
+        max_turn_index=len(conversation["turns"]) - 1,
         turns_text=_turns_to_text(conversation["turns"]),
         geometry=", ".join(dims["geometry"]),
         coherence=", ".join(dims["coherence"]),
@@ -194,34 +252,10 @@ def chunk_conversation(
 
     raw_chunks = data.get("chunks", [])
     proposals = data.get("schema_proposals", [])
-    turns = conversation["turns"]
-    chunks = []
-
-    for i, rc in enumerate(raw_chunks):
-        turn_indices = rc.get("turns", [])
-        turn_texts = [turns[j]["text"] for j in turn_indices if j < len(turns)]
-        text = " ".join(turn_texts)
-        tok_count = estimate_tokens(text)
-
-        if tok_count < min_tok and len(raw_chunks) > 1:
-            continue
-        chunk = {
-            "chunk_id": str(uuid_lib.uuid4()),
-            "conversation_id": conversation["id"],
-            "source_file": conversation["source_file"],
-            "text": text,
-            "turns": turn_indices,
-            "tags": rc.get("tags", {}),
-            "chunk_type": rc.get("chunk_type", "exchange"),
-            "split_rationale": rc.get("split_rationale", ""),
-            "schema_version": schema_version,
-            "llm_failure": False,
-            "prompt_preset": prompt_preset,
-            "schema_proposals": proposals if i == 0 else [],
-        }
-        chunks.append(chunk)
-
-    return chunks if chunks else _build_fallback_chunks(conversation, prompt_preset)
+    return _post_process_chunks(
+        raw_chunks, proposals, conversation,
+        min_tok, prompt_preset, schema_version,
+    )
 
 
 def chunk_conversations_batch(
@@ -274,6 +308,8 @@ def chunk_conversations_batch(
     for conv in conversations:
         user_msg = CHUNK_USER_TEMPLATE.format(
             name=conv.get("conversation_name", "(unnamed)"),
+            num_turns=len(conv["turns"]),
+            max_turn_index=len(conv["turns"]) - 1,
             turns_text=_turns_to_text(conv["turns"]),
             geometry=", ".join(dims["geometry"]),
             coherence=", ".join(dims["coherence"]),
@@ -310,34 +346,10 @@ def chunk_conversations_batch(
 
         raw_chunks = data.get("chunks", [])
         proposals = data.get("schema_proposals", [])
-        turns = conv["turns"]
-        chunks = []
-
-        for i, rc in enumerate(raw_chunks):
-            turn_indices = rc.get("turns", [])
-            turn_texts = [turns[j]["text"] for j in turn_indices if j < len(turns)]
-            chunk_text = " ".join(turn_texts)
-            tok_count = estimate_tokens(chunk_text)
-
-            if tok_count < min_tok and len(raw_chunks) > 1:
-                continue
-            chunk = {
-                "chunk_id": str(uuid_lib.uuid4()),
-                "conversation_id": conv["id"],
-                "source_file": conv["source_file"],
-                "text": chunk_text,
-                "turns": turn_indices,
-                "tags": rc.get("tags", {}),
-                "chunk_type": rc.get("chunk_type", "exchange"),
-                "split_rationale": rc.get("split_rationale", ""),
-                "schema_version": schema_version,
-                "llm_failure": False,
-                "prompt_preset": prompt_preset,
-                "schema_proposals": proposals if i == 0 else [],
-            }
-            chunks.append(chunk)
-
-        all_results[idx] = chunks if chunks else _build_fallback_chunks(conv, prompt_preset)
+        all_results[idx] = _post_process_chunks(
+            raw_chunks, proposals, conv,
+            min_tok, prompt_preset, schema_version,
+        )
         if on_complete:
             on_complete(idx, all_results[idx], None)
 
