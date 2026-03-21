@@ -1,5 +1,6 @@
 """Validation, compaction, and chunk-feedback analysis for discovery maps."""
 
+import statistics
 from difflib import SequenceMatcher
 
 
@@ -40,3 +41,53 @@ def dedup_observations(observations: list[dict]) -> list[dict]:
         if existing is None or obs.get("confidence", 0) > existing.get("confidence", 0):
             best[key] = obs
     return list(best.values())
+
+
+def validate_discovery_map(map_data: dict) -> dict:
+    """Check structural integrity of a discovery map."""
+    list_keys = ("boundary_signals", "coherence_anchors", "chunk_archetypes", "anti_patterns")
+    sizes = {k: len(map_data.get(k, [])) for k in list_keys}
+    total = sum(sizes.values())
+
+    # Near-duplicate ratio across all lists
+    all_dupes = 0
+    for key in list_keys:
+        items = map_data.get(key, [])
+        dupes = find_near_duplicates(items, threshold=0.7)
+        all_dupes += len(dupes)
+    redundancy = all_dupes / max(1, total)
+
+    # Balance: coefficient of variation mapped to 0-1
+    size_values = list(sizes.values())
+    if len(size_values) > 1 and sum(size_values) > 0:
+        mean = statistics.mean(size_values)
+        stdev = statistics.stdev(size_values)
+        cv = stdev / mean if mean > 0 else 0
+        balance = round(max(0.0, 1.0 - cv), 4)
+    else:
+        balance = 1.0
+
+    observations = map_data.get("observations", [])
+    unique_names = len(set(
+        (o.get("pattern_type", ""), o.get("name", "")) for o in observations
+    ))
+
+    return {
+        "total_items": total,
+        "list_sizes": sizes,
+        "redundancy_ratio": round(redundancy, 4),
+        "balance_score": balance,
+        "observation_count": len(observations),
+        "observation_unique_names": unique_names,
+        "has_chunk_evidence": "chunk_evidence_score" in map_data,
+    }
+
+
+def compute_discovery_score(
+    validation: dict, chunk_evidence_score: float | None = None
+) -> float:
+    """Convert validation report into a 0-1 discovery quality score."""
+    base = (1 - validation["redundancy_ratio"]) * 0.3 + validation["balance_score"] * 0.2
+    if chunk_evidence_score is not None:
+        return round(max(0.0, base * 0.5 + chunk_evidence_score * 0.5), 4)
+    return round(max(0.0, base), 4)
