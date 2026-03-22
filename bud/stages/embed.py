@@ -67,19 +67,36 @@ def embed_chunks(
 
             store.add([vector], [metadata])
         except RuntimeError as e:
-            # 429 rate limit — back off and retry once
+            # 429 rate limit — exponential backoff with up to 3 retries
             if "429" in str(e):
-                time.sleep(2)
-                try:
-                    text = chunk["text"][:max_chars]
-                    vector = embedding_client.embed(text)
-                    metadata = {k: v for k, v in chunk.items()}
-                    metadata["chunk_id"] = chunk_id
-                    store.add([vector], [metadata])
-                except (EmbeddingError, ValueError, RuntimeError, ConnectionError) as retry_e:
+                succeeded = False
+                for attempt in range(3):
+                    backoff = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                    time.sleep(backoff)
+                    try:
+                        text = chunk["text"][:max_chars]
+                        vector = embedding_client.embed(text)
+                        metadata = {k: v for k, v in chunk.items()}
+                        metadata["chunk_id"] = chunk_id
+                        store.add([vector], [metadata])
+                        succeeded = True
+                        break
+                    except RuntimeError as retry_e:
+                        if "429" in str(retry_e) and attempt < 2:
+                            continue  # try again with longer backoff
+                        failures.append(chunk)
+                        if on_error:
+                            on_error(chunk, str(retry_e))
+                        break
+                    except (EmbeddingError, ValueError, ConnectionError) as retry_e:
+                        failures.append(chunk)
+                        if on_error:
+                            on_error(chunk, str(retry_e))
+                        break
+                if not succeeded and chunk not in failures:
                     failures.append(chunk)
                     if on_error:
-                        on_error(chunk, str(retry_e))
+                        on_error(chunk, str(e))
             else:
                 failures.append(chunk)
                 if on_error:

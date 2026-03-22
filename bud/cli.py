@@ -917,7 +917,7 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
 
     # Throttle cloud embedding requests to avoid rate limits
     _emb_provider = config.get("embeddings", {}).get("provider", "ollama")
-    _embed_delay = 0.5 if _emb_provider in ("voyage", "openai") else 0.0
+    _embed_delay = 1.5 if _emb_provider in ("voyage", "openai") else 0.0
 
     # Initialize prompt loader
     from bud.lib.prompt_loader import PromptLoader
@@ -1333,108 +1333,68 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
     console.print(f"\n[dim]Output: {output_dir}[/dim]")
 
 
-@main.command()
-@click.argument("query_text")
-@click.option(
-    "--k",
-    type=click.INT,
-    default=5,
-    help="Number of results to return (default: 5)",
-)
-@click.option(
-    "--output-dir", "-o",
-    type=click.Path(file_okay=False, resolve_path=True),
-    help="Path to output directory (overrides config)",
-)
-def query(query_text, k, output_dir):
-    """Query the vector index for relevant context.
+def _run_single_query(query_text, k, config, store, embedding_client, llm, console, output_dir, chat_history=None):
+    """Execute a single RAG query and return the answer.
 
-    SEARCH_TEXT: The search query to find relevant conversation context
+    Args:
+        query_text: The user's question.
+        k: Number of results to retrieve.
+        config: Full bud config dict.
+        store: Loaded VectorStore.
+        embedding_client: EmbeddingClient instance.
+        llm: LLMClient instance.
+        console: Rich Console for output.
+        output_dir: Path for query_log.jsonl.
+        chat_history: Optional list of prior (query, answer) tuples for multi-turn.
+
+    Returns:
+        The LLM answer string (for use in chat history).
     """
-    from rich.console import Console
     from rich.table import Table
-
-    console = Console()
-
-    # Load config
-    config = load_config()
-
-    # Use override or config for output_dir
-    if output_dir:
-        output_dir = Path(output_dir)
-    else:
-        output_dir = get_output_dir()
-
-    console.print(f"\n[bold cyan]Bud RAG Pipeline - Query[/bold cyan]\n")
-    console.print(f"[bold]Query:[/bold] {query_text}")
-    console.print(f"[bold]Top-K:[/bold] {k}\n")
-
-    # Build paths
-    index_dir = output_dir / "index"
-    index_path = str(index_dir / "chunks")
-    metadata_path = index_dir / "chunks_metadata.jsonl"
-
-    # Load FAISS index
-    from bud.lib.store import VectorStore
-    store = VectorStore(index_path, dim=0)  # dim=0 will be inferred from loaded index
-
-    try:
-        store.load()
-    except Exception as e:
-        console.print(f"[red]Error loading index: {e}[/red]")
-        console.print(f"[dim]Make sure you've run 'bud process' first.[/dim]")
-        return
-
-    if store.count() == 0:
-        console.print("[red]No chunks found in the index.[/red]")
-        console.print(f"[dim]Index path: {index_path}[/dim]")
-        return
-
-    console.print(f"[green]✓ Loaded index with {store.count()} chunks[/green]\n")
-
     import time as _time
     from datetime import datetime, timezone
-    query_start = _time.monotonic()
 
-    # Embed the user query
-    from bud.lib.embeddings import EmbeddingClient
-    embedding_client = EmbeddingClient(config)
+    query_start = _time.monotonic()
 
     try:
         query_embedding = embedding_client.embed(query_text)
     except Exception as e:
         console.print(f"[red]Error embedding query: {e}[/red]")
-        return
+        return None
 
     embed_elapsed = _time.monotonic() - query_start
 
-    # Search for top-k similar chunks
     search_results = store.search(query_embedding, k)
-
     retrieval_elapsed = _time.monotonic() - query_start
 
     if not search_results:
         console.print("[yellow]No matching chunks found.[/yellow]")
-        return
+        return None
 
     # Build context from retrieved chunks
     context_parts = []
     for i, chunk in enumerate(search_results, 1):
         context_parts.append(f"[{i}] {chunk.get('text', '')}")
-
     context = "\n\n".join(context_parts)
 
-    # Generate answer using LLM
-    from bud.lib.llm import LLMClient
-    llm = LLMClient(config)
+    # Build conversation history section
+    history_section = ""
+    if chat_history:
+        history_parts = []
+        for prev_q, prev_a in chat_history[-5:]:  # keep last 5 turns
+            history_parts.append(f"User: {prev_q}\nAssistant: {prev_a}")
+        history_section = (
+            "\nPrior conversation:\n"
+            + "\n\n".join(history_parts)
+            + "\n"
+        )
 
     system_msg = "You are a helpful assistant."
-    # Format prompt with context and query
     prompt = f"""You are a helpful assistant answering questions based on conversation context.
 
 Context (from conversation history):
 {context}
-
+{history_section}
 ---
 User Question: {query_text}
 
@@ -1455,28 +1415,26 @@ Instructions:
 
     total_elapsed = _time.monotonic() - query_start
 
-    # Display results as table
+    # Display results table
     table = Table(title="Search Results")
     table.add_column("Rank", style="cyan", no_wrap=True)
     table.add_column("Score", style="magenta", no_wrap=True)
     table.add_column("Source", style="green")
-
     for i, chunk in enumerate(search_results, 1):
-        rank = str(i)
         score = chunk.get("score", "N/A")
         source = chunk.get("source_file", chunk.get("source", "conversations.jsonl"))
-        table.add_row(rank, str(score), source)
-
+        table.add_row(str(i), str(score), source)
     console.print(table)
 
-    # Display answer
     console.print(f"\n[bold]Answer:[/bold]")
     console.print(answer)
 
-    # --- Log query data for future embeddings and learning ---
+    # Log query data
     query_log_path = output_dir / "query_log.jsonl"
     log_entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": "chat" if chat_history is not None else "query",
+        "turn": len(chat_history) + 1 if chat_history is not None else 1,
         "query": query_text,
         "k": k,
         "retrieval": {
@@ -1513,15 +1471,171 @@ Instructions:
             "total_seconds": round(total_elapsed, 3),
         },
     }
+    if chat_history is not None:
+        log_entry["chat_history"] = [
+            {"query": q, "answer": a} for q, a in chat_history
+        ]
 
     try:
         with open(query_log_path, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
-        console.print(f"\n[dim]Query logged to {query_log_path}[/dim]")
-    except Exception as e:
-        console.print(f"\n[yellow]⚠  Failed to log query: {e}[/yellow]")
+    except Exception:
+        pass
 
-    console.print(f"[dim]Query completed in {total_elapsed:.1f}s[/dim]")
+    console.print(f"[dim]{total_elapsed:.1f}s[/dim]")
+    return answer
+
+
+def _load_query_resources(config, output_dir, console):
+    """Load index, embedding client, and LLM for query/chat commands.
+
+    Returns:
+        (store, embedding_client, llm) or None if loading fails.
+    """
+    from bud.lib.store import VectorStore
+    from bud.lib.embeddings import EmbeddingClient
+    from bud.lib.llm import LLMClient
+
+    index_dir = output_dir / "index"
+    index_path = str(index_dir / "chunks")
+
+    store = VectorStore(index_path, dim=0)
+    try:
+        store.load()
+    except Exception as e:
+        console.print(f"[red]Error loading index: {e}[/red]")
+        console.print(f"[dim]Make sure you've run 'bud process' first.[/dim]")
+        return None
+
+    if store.count() == 0:
+        console.print("[red]No chunks found in the index.[/red]")
+        return None
+
+    console.print(f"[green]✓ Loaded index with {store.count()} chunks[/green]\n")
+
+    embedding_client = EmbeddingClient(config)
+    llm = LLMClient(config)
+    return store, embedding_client, llm
+
+
+@main.command()
+@click.argument("query_text")
+@click.option(
+    "--k",
+    type=click.INT,
+    default=5,
+    help="Number of results to return (default: 5)",
+)
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(file_okay=False, resolve_path=True),
+    help="Path to output directory (overrides config)",
+)
+def query(query_text, k, output_dir):
+    """One-shot query against the vector index.
+
+    For interactive multi-turn conversation, use 'bud chat' instead.
+    """
+    from rich.console import Console
+    console = Console()
+
+    config = load_config()
+    if output_dir:
+        output_dir = Path(output_dir)
+    else:
+        output_dir = get_output_dir()
+
+    console.print(f"\n[bold cyan]Bud Query[/bold cyan]\n")
+    console.print(f"[bold]Query:[/bold] {query_text}")
+    console.print(f"[bold]Top-K:[/bold] {k}\n")
+
+    resources = _load_query_resources(config, output_dir, console)
+    if not resources:
+        return
+    store, embedding_client, llm = resources
+
+    _run_single_query(query_text, k, config, store, embedding_client, llm, console, output_dir)
+
+
+@main.command()
+@click.option(
+    "--k",
+    type=click.INT,
+    default=5,
+    help="Number of results to return per turn (default: 5)",
+)
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(file_okay=False, resolve_path=True),
+    help="Path to output directory (overrides config)",
+)
+def chat(k, output_dir):
+    """Interactive multi-turn chat with RAG context.
+
+    Opens an interactive session where each message retrieves fresh
+    context from the vector index. Conversation history is maintained
+    across turns so the LLM can reference prior exchanges.
+
+    Commands during chat:
+      /quit, /exit, /q  — end the session
+      /clear            — clear conversation history
+      /k N              — change number of retrieved chunks
+    """
+    from rich.console import Console
+    console = Console()
+
+    config = load_config()
+    if output_dir:
+        output_dir = Path(output_dir)
+    else:
+        output_dir = get_output_dir()
+
+    console.print(f"\n[bold cyan]Bud Chat[/bold cyan]")
+    console.print(f"[dim]Interactive RAG conversation  ·  top-k: {k}  ·  /quit to exit[/dim]\n")
+
+    resources = _load_query_resources(config, output_dir, console)
+    if not resources:
+        return
+    store, embedding_client, llm = resources
+
+    chat_history: list[tuple[str, str]] = []
+    turn = 0
+
+    while True:
+        try:
+            user_input = console.input("[bold blue]You:[/bold blue] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Session ended.[/dim]")
+            break
+
+        if not user_input:
+            continue
+
+        # Handle commands
+        if user_input.lower() in ("/quit", "/exit", "/q"):
+            console.print(f"[dim]Chat ended. {turn} turn(s) logged.[/dim]")
+            break
+        if user_input.lower() == "/clear":
+            chat_history.clear()
+            console.print("[dim]Conversation history cleared.[/dim]\n")
+            continue
+        if user_input.lower().startswith("/k "):
+            try:
+                k = int(user_input.split()[1])
+                console.print(f"[dim]Top-k set to {k}[/dim]\n")
+            except (ValueError, IndexError):
+                console.print("[yellow]Usage: /k N[/yellow]\n")
+            continue
+
+        console.print()
+        answer = _run_single_query(
+            user_input, k, config, store, embedding_client, llm,
+            console, output_dir, chat_history=chat_history,
+        )
+        if answer:
+            chat_history.append((user_input, answer))
+            turn += 1
+        console.print()
 
 
 @main.command()
