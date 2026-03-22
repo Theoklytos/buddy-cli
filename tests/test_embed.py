@@ -394,3 +394,60 @@ class TestResolveApiKey(unittest.TestCase):
             os.environ.pop("OPENAI_API_KEY", None)
             with self.assertRaises(ValueError):
                 client._resolve_api_key("openai")
+
+
+# ---------------------------------------------------------------------------
+# _embed_openai_compatible tests
+# ---------------------------------------------------------------------------
+
+
+import requests as _requests_module
+
+
+class TestOpenAICompatibleErrors(unittest.TestCase):
+    """Tests for 401/429/timeout handling in _embed_openai_compatible."""
+
+    def _make_config(self, **embed_overrides):
+        base = {"provider": "openai", "api_key": "test-key", "model": "text-embedding-3-small", "base_url": "https://api.openai.com"}
+        base.update(embed_overrides)
+        return {"embeddings": base, "llm": {"timeout_seconds": 10}}
+
+    @patch("requests.post")
+    def test_401_raises_auth_error(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.text = "Invalid API key"
+        mock_post.return_value = mock_resp
+        client = EmbeddingClient(self._make_config())
+        with self.assertRaises(ValueError) as ctx:
+            client._embed_openai_compatible("test text", "https://api.openai.com/v1/embeddings", "bad-key", "text-embedding-3-small")
+        assert "401" in str(ctx.exception) or "authentication" in str(ctx.exception).lower()
+
+    @patch("requests.post")
+    def test_429_raises_rate_limit_error(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 429
+        mock_resp.text = "Rate limit exceeded"
+        mock_post.return_value = mock_resp
+        client = EmbeddingClient(self._make_config())
+        with self.assertRaises(RuntimeError) as ctx:
+            client._embed_openai_compatible("test text", "https://api.openai.com/v1/embeddings", "key", "text-embedding-3-small")
+        assert "429" in str(ctx.exception) or "rate limit" in str(ctx.exception).lower()
+
+    @patch("requests.post")
+    def test_timeout_raises_connection_error(self, mock_post):
+        mock_post.side_effect = _requests_module.exceptions.Timeout("Connection timed out")
+        client = EmbeddingClient(self._make_config())
+        with self.assertRaises(ConnectionError):
+            client._embed_openai_compatible("test text", "https://api.openai.com/v1/embeddings", "key", "text-embedding-3-small")
+
+    @patch("requests.post")
+    def test_successful_embedding(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+        client = EmbeddingClient(self._make_config())
+        result = client._embed_openai_compatible("test", "https://api.openai.com/v1/embeddings", "key", "model")
+        assert result == [0.1, 0.2, 0.3]
