@@ -91,12 +91,16 @@ def configure():
     config.setdefault("embeddings", {})["provider"] = emb_provider
 
     # Smart URL defaults based on provider
-    if emb_provider == "voyage":
-        default_emb_url = config.get("embeddings", {}).get("base_url", "https://api.voyageai.com")
-    elif emb_provider == "openai":
-        default_emb_url = config.get("embeddings", {}).get("base_url", "https://api.openai.com")
+    provider_urls = {
+        "voyage": "https://api.voyageai.com",
+        "openai": "https://api.openai.com",
+        "ollama": "http://localhost:11434",
+    }
+    provider_changed = emb_provider != current_emb_provider
+    if provider_changed:
+        default_emb_url = provider_urls.get(emb_provider, "http://localhost:11434")
     else:
-        default_emb_url = config.get("embeddings", {}).get("base_url", "http://localhost:11434")
+        default_emb_url = config.get("embeddings", {}).get("base_url", provider_urls.get(emb_provider, "http://localhost:11434"))
 
     emb_base_url = Prompt.ask(
         "[blue]Embeddings Base URL[/blue]", default=default_emb_url
@@ -133,11 +137,12 @@ def configure():
         env_var = "VOYAGE_API_KEY" if emb_provider == "voyage" else "OPENAI_API_KEY"
         env_key = os.environ.get(env_var)
         if env_key:
-            console.print(f"  [green]✓[/green] Using API key from ${env_var}")
+            console.print(f"  [green]✓[/green] Using API key from ${env_var} (not stored in repo)")
         else:
             current_key = config.get("embeddings", {}).get("api_key", "")
             if current_key and current_key not in ("NONE", "none"):
-                console.print(f"  [green]✓[/green] API key configured in config.yaml")
+                console.print(f"  [green]✓[/green] API key configured in {CONFIG_FILE}")
+                console.print(f"  [dim]    (outside repo — safe from git)[/dim]")
             else:
                 api_key = Prompt.ask(
                     f"  [blue]API key[/blue] (or set ${env_var})", default=""
@@ -166,27 +171,49 @@ def configure():
 
 
 @main.command("models")
-def models_command():
+@click.option(
+    "--provider", "-p",
+    type=click.Choice(["all", "ollama", "voyage"], case_sensitive=False),
+    default="all",
+    help="Filter by provider (default: all)",
+)
+def models_command(provider):
     """List all supported embedding models and their configuration parameters."""
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
     from bud.lib.model_registry import list_known_models
 
-    table = Table(title="Supported Embedding Models", show_lines=True)
-    table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("Dims", style="magenta", justify="right")
-    table.add_column("Context (tokens)", style="yellow", justify="right")
-    table.add_column("max_embed_chars", style="green", justify="right")
-    table.add_column("chunk_max_tokens", style="blue", justify="right")
+    all_models = list_known_models()
 
-    for entry in list_known_models():
-        table.add_row(
-            entry["model"],
-            str(entry["dimension"]),
-            str(entry["context_tokens"]),
-            str(entry["max_embed_chars"]),
-            str(entry["chunk_max_tokens"]),
-        )
+    # Group models by provider
+    local_models = [m for m in all_models if m.get("provider", "ollama") == "ollama"]
+    voyage_models = [m for m in all_models if m.get("provider") == "voyage"]
 
-    console.print(table)
+    def _make_table(title, models):
+        table = Table(title=title, show_lines=True)
+        table.add_column("Model", style="cyan", no_wrap=True)
+        table.add_column("Dims", style="magenta", justify="right")
+        table.add_column("Context (tokens)", style="yellow", justify="right")
+        table.add_column("max_embed_chars", style="green", justify="right")
+        table.add_column("chunk_max_tokens", style="blue", justify="right")
+        for entry in models:
+            table.add_row(
+                entry["model"],
+                str(entry["dimension"]),
+                str(entry["context_tokens"]),
+                str(entry["max_embed_chars"]),
+                str(entry["chunk_max_tokens"]),
+            )
+        return table
+
+    if provider in ("all", "ollama") and local_models:
+        console.print(_make_table("Local Models (ollama)", local_models))
+    if provider in ("all", "voyage") and voyage_models:
+        if provider == "all":
+            console.print()
+        console.print(_make_table("Cloud Models (voyage)", voyage_models))
+
     console.print(
         "\n[dim]These limits are applied automatically when you run "
         "'bud configure' or 'bud process'.[/dim]"
@@ -888,6 +915,10 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
     llm = LLMClient(config, concurrency=concurrency)
     embedding_client = EmbeddingClient(config)
 
+    # Throttle cloud embedding requests to avoid rate limits
+    _emb_provider = config.get("embeddings", {}).get("provider", "ollama")
+    _embed_delay = 0.5 if _emb_provider in ("voyage", "openai") else 0.0
+
     # Initialize prompt loader
     from bud.lib.prompt_loader import PromptLoader
     prompts_dir = str(Path(__file__).parent / "prompts")
@@ -1029,6 +1060,58 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
         conv_task  = progress.add_task("[cyan]Conversations[/cyan]", total=n_convs)
         op_task    = progress.add_task("", total=None)
 
+        # --- Re-embed queued failures before processing new batches ---
+        if failed_chunks:
+            from bud.lib.model_registry import resolve_embedding_model as _resolve
+            _model_cfg_q = _resolve(config.get("embeddings", {}).get("model", ""))
+            n_queued = len(failed_chunks)
+            progress.update(
+                op_task,
+                description=(
+                    f"[blue]embed[/blue]   "
+                    f"[dim]re-embedding {n_queued} queued chunks[/dim]"
+                ),
+            )
+
+            def _on_retry_chunk(done, total):
+                progress.update(
+                    op_task,
+                    description=(
+                        f"[blue]embed[/blue]   "
+                        f"[dim]re-embedding {done}/{total} queued chunks[/dim]"
+                    ),
+                )
+
+            retry_errors: list[str] = []
+
+            def _on_retry_error(chunk, error_msg, _errs=retry_errors):
+                if len(_errs) < 1:
+                    _errs.append(error_msg)
+
+            retry_failed = embed_chunks(
+                failed_chunks, embedding_client, store,
+                index_mgr.embed_queue_path,
+                on_chunk=_on_retry_chunk,
+                on_error=_on_retry_error,
+                max_chars=_model_cfg_q["max_embed_chars"],
+                request_delay=_embed_delay,
+            )
+
+            retry_embedded = n_queued - retry_failed
+            total_chunks += retry_embedded
+            if retry_failed > 0:
+                first_err = retry_errors[0] if retry_errors else "unknown error"
+                progress.print(
+                    f"  [yellow]⚠  {retry_failed}/{n_queued} queued chunks still failing[/yellow]\n"
+                    f"    [dim]{first_err}[/dim]"
+                )
+            else:
+                clear_embed_queue(index_mgr.embed_queue_path)
+                progress.print(
+                    f"  [green]✓ Re-embedded {retry_embedded} queued chunks successfully[/green]"
+                )
+            failed_chunks = []
+
         conv_idx = 0
         for i in range(0, n_convs, batch_size):
             batch = all_conversations[i:i + batch_size]
@@ -1129,7 +1212,14 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
             all_chunks_for_embed = failed_chunks + batch_chunks
             n_embed = len(all_chunks_for_embed)
 
-            def _on_chunk(done, total, _batch=batch_num):
+            # Create a visible embed progress bar with a real count
+            embed_task = progress.add_task(
+                f"[blue]embed[/blue] batch {batch_num}/{n_batches}",
+                total=n_embed,
+            )
+
+            def _on_chunk(done, total, _batch=batch_num, _etask=embed_task):
+                progress.update(_etask, completed=done)
                 progress.update(
                     op_task,
                     description=(
@@ -1159,7 +1249,11 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
                 on_chunk=_on_chunk,
                 on_error=_on_error,
                 max_chars=_model_cfg["max_embed_chars"],
+                request_delay=_embed_delay,
             )
+
+            # Clean up the embed bar once done
+            progress.update(embed_task, visible=False)
 
             if failed < len(all_chunks_for_embed):
                 clear_embed_queue(index_mgr.embed_queue_path)
@@ -1181,6 +1275,11 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
                     f"{total_chunks} total  "
                     f"{errors} errors[/dim]"
                 ),
+            )
+            progress.print(
+                f"  [green]✓[/green] batch {batch_num}/{n_batches}: "
+                f"{len(batch_chunks)} chunks, {embedded} embedded, "
+                f"{total_chunks} total"
             )
 
             tracker.mark_complete(filename, batch_num)
@@ -1293,6 +1392,10 @@ def query(query_text, k, output_dir):
 
     console.print(f"[green]✓ Loaded index with {store.count()} chunks[/green]\n")
 
+    import time as _time
+    from datetime import datetime, timezone
+    query_start = _time.monotonic()
+
     # Embed the user query
     from bud.lib.embeddings import EmbeddingClient
     embedding_client = EmbeddingClient(config)
@@ -1303,8 +1406,12 @@ def query(query_text, k, output_dir):
         console.print(f"[red]Error embedding query: {e}[/red]")
         return
 
+    embed_elapsed = _time.monotonic() - query_start
+
     # Search for top-k similar chunks
     search_results = store.search(query_embedding, k)
+
+    retrieval_elapsed = _time.monotonic() - query_start
 
     if not search_results:
         console.print("[yellow]No matching chunks found.[/yellow]")
@@ -1321,6 +1428,7 @@ def query(query_text, k, output_dir):
     from bud.lib.llm import LLMClient
     llm = LLMClient(config)
 
+    system_msg = "You are a helpful assistant."
     # Format prompt with context and query
     prompt = f"""You are a helpful assistant answering questions based on conversation context.
 
@@ -1337,11 +1445,15 @@ Instructions:
 - Cite source by rank number when relevant
 """
 
+    llm_error = None
     try:
-        answer = llm.complete("You are a helpful assistant.", prompt)
+        answer = llm.complete(system_msg, prompt)
     except Exception as e:
         console.print(f"[red]Error generating answer: {e}[/red]")
         answer = "Unable to generate answer due to LLM error."
+        llm_error = str(e)
+
+    total_elapsed = _time.monotonic() - query_start
 
     # Display results as table
     table = Table(title="Search Results")
@@ -1361,7 +1473,55 @@ Instructions:
     console.print(f"\n[bold]Answer:[/bold]")
     console.print(answer)
 
-    console.print(f"\n[dim]Query completed.[/dim]")
+    # --- Log query data for future embeddings and learning ---
+    query_log_path = output_dir / "query_log.jsonl"
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "query": query_text,
+        "k": k,
+        "retrieval": {
+            "chunks_in_index": store.count(),
+            "results_returned": len(search_results),
+            "results": [
+                {
+                    "rank": i,
+                    "score": chunk.get("score"),
+                    "chunk_id": chunk.get("chunk_id"),
+                    "chunk_type": chunk.get("chunk_type"),
+                    "source_file": chunk.get("source_file", chunk.get("source")),
+                    "conversation_id": chunk.get("conversation_id"),
+                    "text": chunk.get("text", "")[:500],
+                }
+                for i, chunk in enumerate(search_results, 1)
+            ],
+        },
+        "llm": {
+            "system_prompt": system_msg,
+            "user_prompt": prompt,
+            "response": answer,
+            "error": llm_error,
+            "model": config.get("llm", {}).get("model"),
+            "provider": config.get("llm", {}).get("provider"),
+        },
+        "embeddings": {
+            "model": config.get("embeddings", {}).get("model"),
+            "provider": config.get("embeddings", {}).get("provider"),
+        },
+        "timing": {
+            "embed_seconds": round(embed_elapsed, 3),
+            "retrieval_seconds": round(retrieval_elapsed, 3),
+            "total_seconds": round(total_elapsed, 3),
+        },
+    }
+
+    try:
+        with open(query_log_path, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+        console.print(f"\n[dim]Query logged to {query_log_path}[/dim]")
+    except Exception as e:
+        console.print(f"\n[yellow]⚠  Failed to log query: {e}[/yellow]")
+
+    console.print(f"[dim]Query completed in {total_elapsed:.1f}s[/dim]")
 
 
 @main.command()

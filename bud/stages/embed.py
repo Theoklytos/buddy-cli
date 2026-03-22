@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 
 from bud.lib.errors import EmbeddingError
 
@@ -17,6 +18,7 @@ def embed_chunks(
     on_chunk=None,
     on_error=None,
     max_chars: int = MAX_EMBED_CHARS,
+    request_delay: float = 0.0,
 ) -> int:
     """Embed chunks and add to vector store.
 
@@ -45,6 +47,8 @@ def embed_chunks(
                 on_chunk(idx, total)
             continue
         try:
+            if request_delay > 0 and idx > 1:
+                time.sleep(request_delay)
             # Truncate text to the model's effective context window
             text = chunk["text"][:max_chars]
             vector = embedding_client.embed(text)
@@ -62,7 +66,25 @@ def embed_chunks(
                 store._create_index()
 
             store.add([vector], [metadata])
-        except EmbeddingError as e:
+        except RuntimeError as e:
+            # 429 rate limit — back off and retry once
+            if "429" in str(e):
+                time.sleep(2)
+                try:
+                    text = chunk["text"][:max_chars]
+                    vector = embedding_client.embed(text)
+                    metadata = {k: v for k, v in chunk.items()}
+                    metadata["chunk_id"] = chunk_id
+                    store.add([vector], [metadata])
+                except (EmbeddingError, ValueError, RuntimeError, ConnectionError) as retry_e:
+                    failures.append(chunk)
+                    if on_error:
+                        on_error(chunk, str(retry_e))
+            else:
+                failures.append(chunk)
+                if on_error:
+                    on_error(chunk, str(e))
+        except (EmbeddingError, ValueError, ConnectionError) as e:
             failures.append(chunk)
             if on_error:
                 on_error(chunk, str(e))

@@ -12,3 +12,13 @@ build/
 *.bak.faiss
 *_metadata.jsonl
 *.tmp
+
+# Query logs — contains conversation data
+query_log.jsonl
+
+# Secrets / config — never commit API keys
+config.yaml
+.env
+.env.*
+*.key
+*.pem
