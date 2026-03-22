@@ -47,6 +47,8 @@ class EmbeddingClient:
         provider = self._cfg.get("provider", "ollama")
         if provider == "openai":
             return self._embed_openai(text)
+        if provider == "voyage":
+            return self._embed_voyage(text)
         return self._embed_ollama(text)
 
     @property
@@ -182,4 +184,12 @@ class EmbeddingClient:
         base = self._cfg.get("base_url", "https://api.openai.com").rstrip("/")
         endpoint = f"{base}/v1/embeddings"
         model = self._cfg.get("model", "text-embedding-3-small")
+        return self._embed_openai_compatible(text, endpoint, api_key, model)
+
+    def _embed_voyage(self, text: str) -> list[float]:
+        """Voyage AI embedding — delegates to shared compatible method."""
+        api_key = self._resolve_api_key("voyage")
+        base = self._cfg.get("base_url", "https://api.voyageai.com").rstrip("/")
+        endpoint = f"{base}/v1/embeddings"
+        model = self._cfg.get("model", "voyage-3-large")
         return self._embed_openai_compatible(text, endpoint, api_key, model)

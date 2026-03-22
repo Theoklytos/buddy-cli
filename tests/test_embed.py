@@ -451,3 +451,54 @@ class TestOpenAICompatibleErrors(unittest.TestCase):
         client = EmbeddingClient(self._make_config())
         result = client._embed_openai_compatible("test", "https://api.openai.com/v1/embeddings", "key", "model")
         assert result == [0.1, 0.2, 0.3]
+
+
+# ---------------------------------------------------------------------------
+# Voyage AI dispatch tests
+# ---------------------------------------------------------------------------
+
+
+class TestVoyageEmbed(unittest.TestCase):
+    """Tests for Voyage AI embedding dispatch."""
+
+    def _make_config(self, **embed_overrides):
+        base = {"provider": "voyage", "api_key": "test-key", "model": "voyage-3-large", "base_url": "https://api.voyageai.com"}
+        base.update(embed_overrides)
+        return {"embeddings": base, "llm": {"timeout_seconds": 10}}
+
+    @patch("requests.post")
+    def test_voyage_embed_success(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        client = EmbeddingClient(self._make_config())
+        result = client.embed("test text")
+        assert result == [0.1, 0.2, 0.3]
+
+        # Verify correct endpoint
+        call_args = mock_post.call_args
+        assert "api.voyageai.com" in call_args[0][0]
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-key"
+
+    @patch("requests.post")
+    def test_voyage_uses_custom_base_url(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [{"embedding": [0.4, 0.5]}]}
+        mock_resp.raise_for_status = MagicMock()
+        mock_post.return_value = mock_resp
+
+        client = EmbeddingClient(self._make_config(base_url="https://custom.endpoint.com"))
+        client.embed("text")
+        assert "custom.endpoint.com" in mock_post.call_args[0][0]
+
+    def test_voyage_missing_key_raises(self):
+        client = EmbeddingClient(self._make_config(api_key=""))
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("VOYAGE_API_KEY", None)
+            with self.assertRaises(ValueError) as ctx:
+                client.embed("test")
+            assert "VOYAGE_API_KEY" in str(ctx.exception)
