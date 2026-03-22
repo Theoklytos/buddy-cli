@@ -85,14 +85,21 @@ def configure():
     current_emb_provider = config.get("embeddings", {}).get("provider", "ollama")
     emb_provider = Prompt.ask(
         "[blue]Embeddings Provider[/blue]",
-        choices=["ollama", "openai"],
+        choices=["ollama", "openai", "voyage"],
         default=current_emb_provider,
     )
     config.setdefault("embeddings", {})["provider"] = emb_provider
 
-    current_emb_url = config.get("embeddings", {}).get("base_url", "http://localhost:11434")
+    # Smart URL defaults based on provider
+    if emb_provider == "voyage":
+        default_emb_url = config.get("embeddings", {}).get("base_url", "https://api.voyageai.com")
+    elif emb_provider == "openai":
+        default_emb_url = config.get("embeddings", {}).get("base_url", "https://api.openai.com")
+    else:
+        default_emb_url = config.get("embeddings", {}).get("base_url", "http://localhost:11434")
+
     emb_base_url = Prompt.ask(
-        "[blue]Embeddings Base URL[/blue]", default=current_emb_url
+        "[blue]Embeddings Base URL[/blue]", default=default_emb_url
     )
     config.setdefault("embeddings", {})["base_url"] = emb_base_url
 
@@ -119,6 +126,26 @@ def configure():
             f"max_embed_chars: {model_cfg['max_embed_chars']}[/dim]\n"
             f"  [dim]Tip: run 'bud models' to see all supported models.[/dim]"
         )
+
+    # API key for cloud providers
+    if emb_provider in ("openai", "voyage"):
+        import os
+        env_var = "VOYAGE_API_KEY" if emb_provider == "voyage" else "OPENAI_API_KEY"
+        env_key = os.environ.get(env_var)
+        if env_key:
+            console.print(f"  [green]✓[/green] Using API key from ${env_var}")
+        else:
+            current_key = config.get("embeddings", {}).get("api_key", "")
+            if current_key and current_key not in ("NONE", "none"):
+                console.print(f"  [green]✓[/green] API key configured in config.yaml")
+            else:
+                api_key = Prompt.ask(
+                    f"  [blue]API key[/blue] (or set ${env_var})", default=""
+                )
+                if api_key:
+                    config.setdefault("embeddings", {})["api_key"] = api_key
+                else:
+                    console.print(f"  [yellow]⚠  No API key set — export {env_var} before running embed[/yellow]")
 
     # Save and validate
     console.print("\n[bold]Saving configuration...[/bold]")

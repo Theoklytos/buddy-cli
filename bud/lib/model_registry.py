@@ -246,6 +246,44 @@ _REGISTRY: dict[str, dict] = {
         "description": "Paraphrase Multilingual — 768 dims, 512-token context",
         "known": True,
     },
+
+    # ── Voyage AI (cloud) ──────────────────────────────────────────────────
+    "voyage-3-large": {
+        "dimension": 1024,
+        "context_tokens": 32000,
+        "max_embed_chars": 8000,
+        "chunk_max_tokens": 800,
+        "chunk_min_tokens": 10,
+        "description": "Voyage 3 Large — 1024 dims, 32K-token context",
+        "known": True,
+    },
+    "voyage-3-lite": {
+        "dimension": 512,
+        "context_tokens": 32000,
+        "max_embed_chars": 8000,
+        "chunk_max_tokens": 800,
+        "chunk_min_tokens": 10,
+        "description": "Voyage 3 Lite — 512 dims, 32K-token context",
+        "known": True,
+    },
+    "voyage-code-3": {
+        "dimension": 1024,
+        "context_tokens": 32000,
+        "max_embed_chars": 8000,
+        "chunk_max_tokens": 800,
+        "chunk_min_tokens": 10,
+        "description": "Voyage Code 3 — 1024 dims, 32K-token context",
+        "known": True,
+    },
+    "voyage-4-large": {
+        "dimension": 1024,
+        "context_tokens": 32000,
+        "max_embed_chars": 8000,
+        "chunk_max_tokens": 800,
+        "chunk_min_tokens": 10,
+        "description": "Voyage 4 Large — 1024 dims, 32K-token context",
+        "known": True,
+    },
 }
 
 
