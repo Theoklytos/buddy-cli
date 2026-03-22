@@ -104,3 +104,25 @@ def test_validate_config_rejects_invalid_embedding_provider():
     bad = {**VALID_CONFIG, "embeddings": bad_emb}
     ok, errors = cfg.validate_config(bad)
     assert ok is False
+
+
+def test_validate_config_accepts_voyage_provider():
+    import copy
+    cfg_data = copy.deepcopy(VALID_CONFIG)
+    cfg_data["embeddings"]["provider"] = "voyage"
+    cfg_data["embeddings"]["api_key"] = "test-key"
+    ok, errors = cfg.validate_config(cfg_data)
+    # Should not have provider error
+    assert not any("embeddings.provider" in e for e in errors)
+
+
+def test_validate_config_warns_cloud_provider_missing_api_key():
+    import copy
+    import os
+    cfg_data = copy.deepcopy(VALID_CONFIG)
+    cfg_data["embeddings"]["provider"] = "voyage"
+    # No api_key set, no env var
+    with patch.dict(os.environ, {}, clear=True):
+        os.environ.pop("VOYAGE_API_KEY", None)
+        ok, errors = cfg.validate_config(cfg_data)
+    assert any("api_key" in e.lower() or "key" in e.lower() for e in errors)

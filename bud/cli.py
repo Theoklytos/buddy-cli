@@ -85,14 +85,25 @@ def configure():
     current_emb_provider = config.get("embeddings", {}).get("provider", "ollama")
     emb_provider = Prompt.ask(
         "[blue]Embeddings Provider[/blue]",
-        choices=["ollama", "openai"],
+        choices=["ollama", "openai", "voyage"],
         default=current_emb_provider,
     )
     config.setdefault("embeddings", {})["provider"] = emb_provider
 
-    current_emb_url = config.get("embeddings", {}).get("base_url", "http://localhost:11434")
+    # Smart URL defaults based on provider
+    provider_urls = {
+        "voyage": "https://api.voyageai.com",
+        "openai": "https://api.openai.com",
+        "ollama": "http://localhost:11434",
+    }
+    provider_changed = emb_provider != current_emb_provider
+    if provider_changed:
+        default_emb_url = provider_urls.get(emb_provider, "http://localhost:11434")
+    else:
+        default_emb_url = config.get("embeddings", {}).get("base_url", provider_urls.get(emb_provider, "http://localhost:11434"))
+
     emb_base_url = Prompt.ask(
-        "[blue]Embeddings Base URL[/blue]", default=current_emb_url
+        "[blue]Embeddings Base URL[/blue]", default=default_emb_url
     )
     config.setdefault("embeddings", {})["base_url"] = emb_base_url
 
@@ -120,6 +131,27 @@ def configure():
             f"  [dim]Tip: run 'bud models' to see all supported models.[/dim]"
         )
 
+    # API key for cloud providers
+    if emb_provider in ("openai", "voyage"):
+        import os
+        env_var = "VOYAGE_API_KEY" if emb_provider == "voyage" else "OPENAI_API_KEY"
+        env_key = os.environ.get(env_var)
+        if env_key:
+            console.print(f"  [green]✓[/green] Using API key from ${env_var} (not stored in repo)")
+        else:
+            current_key = config.get("embeddings", {}).get("api_key", "")
+            if current_key and current_key not in ("NONE", "none"):
+                console.print(f"  [green]✓[/green] API key configured in {CONFIG_FILE}")
+                console.print(f"  [dim]    (outside repo — safe from git)[/dim]")
+            else:
+                api_key = Prompt.ask(
+                    f"  [blue]API key[/blue] (or set ${env_var})", default=""
+                )
+                if api_key:
+                    config.setdefault("embeddings", {})["api_key"] = api_key
+                else:
+                    console.print(f"  [yellow]⚠  No API key set — export {env_var} before running embed[/yellow]")
+
     # Save and validate
     console.print("\n[bold]Saving configuration...[/bold]")
     save_config(config)
@@ -139,27 +171,49 @@ def configure():
 
 
 @main.command("models")
-def models_command():
+@click.option(
+    "--provider", "-p",
+    type=click.Choice(["all", "ollama", "voyage"], case_sensitive=False),
+    default="all",
+    help="Filter by provider (default: all)",
+)
+def models_command(provider):
     """List all supported embedding models and their configuration parameters."""
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
     from bud.lib.model_registry import list_known_models
 
-    table = Table(title="Supported Embedding Models", show_lines=True)
-    table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("Dims", style="magenta", justify="right")
-    table.add_column("Context (tokens)", style="yellow", justify="right")
-    table.add_column("max_embed_chars", style="green", justify="right")
-    table.add_column("chunk_max_tokens", style="blue", justify="right")
+    all_models = list_known_models()
 
-    for entry in list_known_models():
-        table.add_row(
-            entry["model"],
-            str(entry["dimension"]),
-            str(entry["context_tokens"]),
-            str(entry["max_embed_chars"]),
-            str(entry["chunk_max_tokens"]),
-        )
+    # Group models by provider
+    local_models = [m for m in all_models if m.get("provider", "ollama") == "ollama"]
+    voyage_models = [m for m in all_models if m.get("provider") == "voyage"]
 
-    console.print(table)
+    def _make_table(title, models):
+        table = Table(title=title, show_lines=True)
+        table.add_column("Model", style="cyan", no_wrap=True)
+        table.add_column("Dims", style="magenta", justify="right")
+        table.add_column("Context (tokens)", style="yellow", justify="right")
+        table.add_column("max_embed_chars", style="green", justify="right")
+        table.add_column("chunk_max_tokens", style="blue", justify="right")
+        for entry in models:
+            table.add_row(
+                entry["model"],
+                str(entry["dimension"]),
+                str(entry["context_tokens"]),
+                str(entry["max_embed_chars"]),
+                str(entry["chunk_max_tokens"]),
+            )
+        return table
+
+    if provider in ("all", "ollama") and local_models:
+        console.print(_make_table("Local Models (ollama)", local_models))
+    if provider in ("all", "voyage") and voyage_models:
+        if provider == "all":
+            console.print()
+        console.print(_make_table("Cloud Models (voyage)", voyage_models))
+
     console.print(
         "\n[dim]These limits are applied automatically when you run "
         "'bud configure' or 'bud process'.[/dim]"
@@ -861,6 +915,10 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
     llm = LLMClient(config, concurrency=concurrency)
     embedding_client = EmbeddingClient(config)
 
+    # Throttle cloud embedding requests to avoid rate limits
+    _emb_provider = config.get("embeddings", {}).get("provider", "ollama")
+    _embed_delay = 1.5 if _emb_provider in ("voyage", "openai") else 0.0
+
     # Initialize prompt loader
     from bud.lib.prompt_loader import PromptLoader
     prompts_dir = str(Path(__file__).parent / "prompts")
@@ -1002,6 +1060,58 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
         conv_task  = progress.add_task("[cyan]Conversations[/cyan]", total=n_convs)
         op_task    = progress.add_task("", total=None)
 
+        # --- Re-embed queued failures before processing new batches ---
+        if failed_chunks:
+            from bud.lib.model_registry import resolve_embedding_model as _resolve
+            _model_cfg_q = _resolve(config.get("embeddings", {}).get("model", ""))
+            n_queued = len(failed_chunks)
+            progress.update(
+                op_task,
+                description=(
+                    f"[blue]embed[/blue]   "
+                    f"[dim]re-embedding {n_queued} queued chunks[/dim]"
+                ),
+            )
+
+            def _on_retry_chunk(done, total):
+                progress.update(
+                    op_task,
+                    description=(
+                        f"[blue]embed[/blue]   "
+                        f"[dim]re-embedding {done}/{total} queued chunks[/dim]"
+                    ),
+                )
+
+            retry_errors: list[str] = []
+
+            def _on_retry_error(chunk, error_msg, _errs=retry_errors):
+                if len(_errs) < 1:
+                    _errs.append(error_msg)
+
+            retry_failed = embed_chunks(
+                failed_chunks, embedding_client, store,
+                index_mgr.embed_queue_path,
+                on_chunk=_on_retry_chunk,
+                on_error=_on_retry_error,
+                max_chars=_model_cfg_q["max_embed_chars"],
+                request_delay=_embed_delay,
+            )
+
+            retry_embedded = n_queued - retry_failed
+            total_chunks += retry_embedded
+            if retry_failed > 0:
+                first_err = retry_errors[0] if retry_errors else "unknown error"
+                progress.print(
+                    f"  [yellow]⚠  {retry_failed}/{n_queued} queued chunks still failing[/yellow]\n"
+                    f"    [dim]{first_err}[/dim]"
+                )
+            else:
+                clear_embed_queue(index_mgr.embed_queue_path)
+                progress.print(
+                    f"  [green]✓ Re-embedded {retry_embedded} queued chunks successfully[/green]"
+                )
+            failed_chunks = []
+
         conv_idx = 0
         for i in range(0, n_convs, batch_size):
             batch = all_conversations[i:i + batch_size]
@@ -1102,7 +1212,14 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
             all_chunks_for_embed = failed_chunks + batch_chunks
             n_embed = len(all_chunks_for_embed)
 
-            def _on_chunk(done, total, _batch=batch_num):
+            # Create a visible embed progress bar with a real count
+            embed_task = progress.add_task(
+                f"[blue]embed[/blue] batch {batch_num}/{n_batches}",
+                total=n_embed,
+            )
+
+            def _on_chunk(done, total, _batch=batch_num, _etask=embed_task):
+                progress.update(_etask, completed=done)
                 progress.update(
                     op_task,
                     description=(
@@ -1132,7 +1249,11 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
                 on_chunk=_on_chunk,
                 on_error=_on_error,
                 max_chars=_model_cfg["max_embed_chars"],
+                request_delay=_embed_delay,
             )
+
+            # Clean up the embed bar once done
+            progress.update(embed_task, visible=False)
 
             if failed < len(all_chunks_for_embed):
                 clear_embed_queue(index_mgr.embed_queue_path)
@@ -1154,6 +1275,11 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
                     f"{total_chunks} total  "
                     f"{errors} errors[/dim]"
                 ),
+            )
+            progress.print(
+                f"  [green]✓[/green] batch {batch_num}/{n_batches}: "
+                f"{len(batch_chunks)} chunks, {embedded} embedded, "
+                f"{total_chunks} total"
             )
 
             tracker.mark_complete(filename, batch_num)
@@ -1207,6 +1333,191 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
     console.print(f"\n[dim]Output: {output_dir}[/dim]")
 
 
+def _run_single_query(query_text, k, config, store, embedding_client, llm, console, output_dir, chat_history=None):
+    """Execute a single RAG query and return the answer.
+
+    Args:
+        query_text: The user's question.
+        k: Number of results to retrieve.
+        config: Full bud config dict.
+        store: Loaded VectorStore.
+        embedding_client: EmbeddingClient instance.
+        llm: LLMClient instance.
+        console: Rich Console for output.
+        output_dir: Path for query_log.jsonl.
+        chat_history: Optional list of prior (query, answer) tuples for multi-turn.
+
+    Returns:
+        The LLM answer string (for use in chat history).
+    """
+    from rich.table import Table
+    import time as _time
+    from datetime import datetime, timezone
+
+    query_start = _time.monotonic()
+
+    try:
+        query_embedding = embedding_client.embed(query_text)
+    except Exception as e:
+        console.print(f"[red]Error embedding query: {e}[/red]")
+        return None
+
+    embed_elapsed = _time.monotonic() - query_start
+
+    search_results = store.search(query_embedding, k)
+    retrieval_elapsed = _time.monotonic() - query_start
+
+    if not search_results:
+        console.print("[yellow]No matching chunks found.[/yellow]")
+        return None
+
+    # Build context from retrieved chunks
+    context_parts = []
+    for i, chunk in enumerate(search_results, 1):
+        context_parts.append(f"[{i}] {chunk.get('text', '')}")
+    context = "\n\n".join(context_parts)
+
+    # Build conversation history section
+    history_section = ""
+    if chat_history:
+        history_parts = []
+        for prev_q, prev_a in chat_history[-5:]:  # keep last 5 turns
+            history_parts.append(f"User: {prev_q}\nAssistant: {prev_a}")
+        history_section = (
+            "\nPrior conversation:\n"
+            + "\n\n".join(history_parts)
+            + "\n"
+        )
+
+    system_msg = "You are a helpful assistant."
+    prompt = f"""You are a helpful assistant answering questions based on conversation context.
+
+Context (from conversation history):
+{context}
+{history_section}
+---
+User Question: {query_text}
+
+Instructions:
+- Answer based ONLY on the context above
+- Be concise and focused
+- If context is unclear or incomplete, say so
+- Cite source by rank number when relevant
+"""
+
+    llm_error = None
+    try:
+        answer = llm.complete(system_msg, prompt)
+    except Exception as e:
+        console.print(f"[red]Error generating answer: {e}[/red]")
+        answer = "Unable to generate answer due to LLM error."
+        llm_error = str(e)
+
+    total_elapsed = _time.monotonic() - query_start
+
+    # Display results table
+    table = Table(title="Search Results")
+    table.add_column("Rank", style="cyan", no_wrap=True)
+    table.add_column("Score", style="magenta", no_wrap=True)
+    table.add_column("Source", style="green")
+    for i, chunk in enumerate(search_results, 1):
+        score = chunk.get("score", "N/A")
+        source = chunk.get("source_file", chunk.get("source", "conversations.jsonl"))
+        table.add_row(str(i), str(score), source)
+    console.print(table)
+
+    console.print(f"\n[bold]Answer:[/bold]")
+    console.print(answer)
+
+    # Log query data
+    query_log_path = output_dir / "query_log.jsonl"
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": "chat" if chat_history is not None else "query",
+        "turn": len(chat_history) + 1 if chat_history is not None else 1,
+        "query": query_text,
+        "k": k,
+        "retrieval": {
+            "chunks_in_index": store.count(),
+            "results_returned": len(search_results),
+            "results": [
+                {
+                    "rank": i,
+                    "score": chunk.get("score"),
+                    "chunk_id": chunk.get("chunk_id"),
+                    "chunk_type": chunk.get("chunk_type"),
+                    "source_file": chunk.get("source_file", chunk.get("source")),
+                    "conversation_id": chunk.get("conversation_id"),
+                    "text": chunk.get("text", "")[:500],
+                }
+                for i, chunk in enumerate(search_results, 1)
+            ],
+        },
+        "llm": {
+            "system_prompt": system_msg,
+            "user_prompt": prompt,
+            "response": answer,
+            "error": llm_error,
+            "model": config.get("llm", {}).get("model"),
+            "provider": config.get("llm", {}).get("provider"),
+        },
+        "embeddings": {
+            "model": config.get("embeddings", {}).get("model"),
+            "provider": config.get("embeddings", {}).get("provider"),
+        },
+        "timing": {
+            "embed_seconds": round(embed_elapsed, 3),
+            "retrieval_seconds": round(retrieval_elapsed, 3),
+            "total_seconds": round(total_elapsed, 3),
+        },
+    }
+    if chat_history is not None:
+        log_entry["chat_history"] = [
+            {"query": q, "answer": a} for q, a in chat_history
+        ]
+
+    try:
+        with open(query_log_path, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception:
+        pass
+
+    console.print(f"[dim]{total_elapsed:.1f}s[/dim]")
+    return answer
+
+
+def _load_query_resources(config, output_dir, console):
+    """Load index, embedding client, and LLM for query/chat commands.
+
+    Returns:
+        (store, embedding_client, llm) or None if loading fails.
+    """
+    from bud.lib.store import VectorStore
+    from bud.lib.embeddings import EmbeddingClient
+    from bud.lib.llm import LLMClient
+
+    index_dir = output_dir / "index"
+    index_path = str(index_dir / "chunks")
+
+    store = VectorStore(index_path, dim=0)
+    try:
+        store.load()
+    except Exception as e:
+        console.print(f"[red]Error loading index: {e}[/red]")
+        console.print(f"[dim]Make sure you've run 'bud process' first.[/dim]")
+        return None
+
+    if store.count() == 0:
+        console.print("[red]No chunks found in the index.[/red]")
+        return None
+
+    console.print(f"[green]✓ Loaded index with {store.count()} chunks[/green]\n")
+
+    embedding_client = EmbeddingClient(config)
+    llm = LLMClient(config)
+    return store, embedding_client, llm
+
+
 @main.command()
 @click.argument("query_text")
 @click.option(
@@ -1221,120 +1532,110 @@ def process(data_dir, output_dir, resume, batch_size, prompt, with_discovery, di
     help="Path to output directory (overrides config)",
 )
 def query(query_text, k, output_dir):
-    """Query the vector index for relevant context.
+    """One-shot query against the vector index.
 
-    SEARCH_TEXT: The search query to find relevant conversation context
+    For interactive multi-turn conversation, use 'bud chat' instead.
     """
     from rich.console import Console
-    from rich.table import Table
-
     console = Console()
 
-    # Load config
     config = load_config()
-
-    # Use override or config for output_dir
     if output_dir:
         output_dir = Path(output_dir)
     else:
         output_dir = get_output_dir()
 
-    console.print(f"\n[bold cyan]Bud RAG Pipeline - Query[/bold cyan]\n")
+    console.print(f"\n[bold cyan]Bud Query[/bold cyan]\n")
     console.print(f"[bold]Query:[/bold] {query_text}")
     console.print(f"[bold]Top-K:[/bold] {k}\n")
 
-    # Build paths
-    index_dir = output_dir / "index"
-    index_path = str(index_dir / "chunks")
-    metadata_path = index_dir / "chunks_metadata.jsonl"
-
-    # Load FAISS index
-    from bud.lib.store import VectorStore
-    store = VectorStore(index_path, dim=0)  # dim=0 will be inferred from loaded index
-
-    try:
-        store.load()
-    except Exception as e:
-        console.print(f"[red]Error loading index: {e}[/red]")
-        console.print(f"[dim]Make sure you've run 'bud process' first.[/dim]")
+    resources = _load_query_resources(config, output_dir, console)
+    if not resources:
         return
+    store, embedding_client, llm = resources
 
-    if store.count() == 0:
-        console.print("[red]No chunks found in the index.[/red]")
-        console.print(f"[dim]Index path: {index_path}[/dim]")
+    _run_single_query(query_text, k, config, store, embedding_client, llm, console, output_dir)
+
+
+@main.command()
+@click.option(
+    "--k",
+    type=click.INT,
+    default=5,
+    help="Number of results to return per turn (default: 5)",
+)
+@click.option(
+    "--output-dir", "-o",
+    type=click.Path(file_okay=False, resolve_path=True),
+    help="Path to output directory (overrides config)",
+)
+def chat(k, output_dir):
+    """Interactive multi-turn chat with RAG context.
+
+    Opens an interactive session where each message retrieves fresh
+    context from the vector index. Conversation history is maintained
+    across turns so the LLM can reference prior exchanges.
+
+    Commands during chat:
+      /quit, /exit, /q  — end the session
+      /clear            — clear conversation history
+      /k N              — change number of retrieved chunks
+    """
+    from rich.console import Console
+    console = Console()
+
+    config = load_config()
+    if output_dir:
+        output_dir = Path(output_dir)
+    else:
+        output_dir = get_output_dir()
+
+    console.print(f"\n[bold cyan]Bud Chat[/bold cyan]")
+    console.print(f"[dim]Interactive RAG conversation  ·  top-k: {k}  ·  /quit to exit[/dim]\n")
+
+    resources = _load_query_resources(config, output_dir, console)
+    if not resources:
         return
+    store, embedding_client, llm = resources
 
-    console.print(f"[green]✓ Loaded index with {store.count()} chunks[/green]\n")
+    chat_history: list[tuple[str, str]] = []
+    turn = 0
 
-    # Embed the user query
-    from bud.lib.embeddings import EmbeddingClient
-    embedding_client = EmbeddingClient(config)
+    while True:
+        try:
+            user_input = console.input("[bold blue]You:[/bold blue] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Session ended.[/dim]")
+            break
 
-    try:
-        query_embedding = embedding_client.embed(query_text)
-    except Exception as e:
-        console.print(f"[red]Error embedding query: {e}[/red]")
-        return
+        if not user_input:
+            continue
 
-    # Search for top-k similar chunks
-    search_results = store.search(query_embedding, k)
+        # Handle commands
+        if user_input.lower() in ("/quit", "/exit", "/q"):
+            console.print(f"[dim]Chat ended. {turn} turn(s) logged.[/dim]")
+            break
+        if user_input.lower() == "/clear":
+            chat_history.clear()
+            console.print("[dim]Conversation history cleared.[/dim]\n")
+            continue
+        if user_input.lower().startswith("/k "):
+            try:
+                k = int(user_input.split()[1])
+                console.print(f"[dim]Top-k set to {k}[/dim]\n")
+            except (ValueError, IndexError):
+                console.print("[yellow]Usage: /k N[/yellow]\n")
+            continue
 
-    if not search_results:
-        console.print("[yellow]No matching chunks found.[/yellow]")
-        return
-
-    # Build context from retrieved chunks
-    context_parts = []
-    for i, chunk in enumerate(search_results, 1):
-        context_parts.append(f"[{i}] {chunk.get('text', '')}")
-
-    context = "\n\n".join(context_parts)
-
-    # Generate answer using LLM
-    from bud.lib.llm import LLMClient
-    llm = LLMClient(config)
-
-    # Format prompt with context and query
-    prompt = f"""You are a helpful assistant answering questions based on conversation context.
-
-Context (from conversation history):
-{context}
-
----
-User Question: {query_text}
-
-Instructions:
-- Answer based ONLY on the context above
-- Be concise and focused
-- If context is unclear or incomplete, say so
-- Cite source by rank number when relevant
-"""
-
-    try:
-        answer = llm.complete("You are a helpful assistant.", prompt)
-    except Exception as e:
-        console.print(f"[red]Error generating answer: {e}[/red]")
-        answer = "Unable to generate answer due to LLM error."
-
-    # Display results as table
-    table = Table(title="Search Results")
-    table.add_column("Rank", style="cyan", no_wrap=True)
-    table.add_column("Score", style="magenta", no_wrap=True)
-    table.add_column("Source", style="green")
-
-    for i, chunk in enumerate(search_results, 1):
-        rank = str(i)
-        score = chunk.get("score", "N/A")
-        source = chunk.get("source_file", chunk.get("source", "conversations.jsonl"))
-        table.add_row(rank, str(score), source)
-
-    console.print(table)
-
-    # Display answer
-    console.print(f"\n[bold]Answer:[/bold]")
-    console.print(answer)
-
-    console.print(f"\n[dim]Query completed.[/dim]")
+        console.print()
+        answer = _run_single_query(
+            user_input, k, config, store, embedding_client, llm,
+            console, output_dir, chat_history=chat_history,
+        )
+        if answer:
+            chat_history.append((user_input, answer))
+            turn += 1
+        console.print()
 
 
 @main.command()

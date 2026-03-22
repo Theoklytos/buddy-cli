@@ -112,15 +112,24 @@ def validate_config(config: dict) -> tuple[bool, list[str]]:
     # Embeddings configuration
     embeddings = config.get("embeddings", {})
     if not embeddings.get("provider"):
-        errors.append("embeddings.provider is required (choose from: ollama, openai)")
-    elif embeddings.get("provider") not in ["ollama", "openai"]:
-        errors.append(f"embeddings.provider must be one of: ollama, openai (got: {embeddings.get('provider')})")
+        errors.append("embeddings.provider is required (choose from: ollama, openai, voyage)")
+    elif embeddings.get("provider") not in ["ollama", "openai", "voyage"]:
+        errors.append(f"embeddings.provider must be one of: ollama, openai, voyage (got: {embeddings.get('provider')})")
     if not embeddings.get("base_url"):
         errors.append("embeddings.base_url is required")
     elif not _is_valid_url(embeddings.get("base_url")):
         errors.append("embeddings.base_url must be a valid HTTP/HTTPS URL")
     if not embeddings.get("model"):
         errors.append("embeddings.model is required")
+
+    if embeddings.get("provider") in ("openai", "voyage"):
+        api_key = embeddings.get("api_key", "")
+        env_var = "VOYAGE_API_KEY" if embeddings["provider"] == "voyage" else "OPENAI_API_KEY"
+        if not api_key and not os.environ.get(env_var):
+            errors.append(
+                f"Cloud provider '{embeddings['provider']}' requires an API key. "
+                f"Set embeddings.api_key in config.yaml or export {env_var}."
+            )
 
     return len(errors) == 0, errors
 

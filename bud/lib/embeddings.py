@@ -1,8 +1,15 @@
 """Embedding client for Bud RAG Pipeline."""
 
+import os
+
 import requests
 
 from bud.lib.errors import EmbeddingError
+
+_ENV_VAR_MAP = {
+    "voyage": "VOYAGE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
 
 
 class EmbeddingClient:
@@ -40,12 +47,35 @@ class EmbeddingClient:
         provider = self._cfg.get("provider", "ollama")
         if provider == "openai":
             return self._embed_openai(text)
+        if provider == "voyage":
+            return self._embed_voyage(text)
         return self._embed_ollama(text)
 
     @property
     def dimension(self) -> int | None:
         """Return the embedding dimension (None until the first successful embed)."""
         return self._dim
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_api_key(self, provider: str) -> str:
+        """Resolve API key: config > env var > raise ValueError."""
+        cfg_key = self._cfg.get("api_key", "")
+        if cfg_key and cfg_key not in ("NONE", "none", ""):
+            return cfg_key
+
+        env_var = _ENV_VAR_MAP.get(provider, f"{provider.upper()}_API_KEY")
+        env_key = os.environ.get(env_var, "")
+        if env_key:
+            return env_key
+
+        raise ValueError(
+            f"No API key found for {provider}. "
+            f"Set it in config.yaml under embeddings.api_key "
+            f"or export {env_var}."
+        )
 
     # ------------------------------------------------------------------
     # Provider-specific helpers
@@ -107,34 +137,59 @@ class EmbeddingClient:
             self._dim = len(result)
         return result
 
-    def _embed_openai(self, text: str) -> list[float]:
-        """Embed using the OpenAI-compatible embeddings endpoint."""
-        base = self._cfg["base_url"].rstrip("/")
+    def _embed_openai_compatible(self, text: str, endpoint: str, api_key: str, model: str) -> list[float]:
+        """Shared embedding method for OpenAI-compatible APIs (OpenAI, Voyage).
+
+        Raises:
+            ValueError: On 401 authentication failure.
+            RuntimeError: On 429 rate limit.
+            ConnectionError: On timeout or connection failure.
+            EmbeddingError: On other non-200 responses or unexpected response shapes.
+        """
         try:
             resp = requests.post(
-                f"{base}/v1/embeddings",
-                json={"model": self._cfg["model"], "input": text},
+                endpoint,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"input": text, "model": model},
                 timeout=self._timeout,
-                headers={"Authorization": f"Bearer {self._cfg.get('api_key', 'NONE')}"},
             )
-        except requests.exceptions.Timeout:
-            raise EmbeddingError("Embedding request timed out")
-        except requests.exceptions.RequestException as e:
-            raise EmbeddingError(f"Embedding connection error: {e}")
+        except requests.exceptions.Timeout as e:
+            raise ConnectionError(f"Request timed out connecting to {endpoint}: {e}")
+        except requests.exceptions.ConnectionError as e:
+            raise ConnectionError(f"Failed to connect to {endpoint}: {e}")
 
+        if resp.status_code == 401:
+            raise ValueError(f"Authentication failed (401). Check your API key for {model}.")
+        if resp.status_code == 429:
+            raise RuntimeError(f"Rate limit exceeded (429). Slow down requests to {model}.")
         if resp.status_code != 200:
-            raise EmbeddingError(
-                f"Embedding API returned {resp.status_code}: {resp.text[:200]}"
-            )
+            raise EmbeddingError(f"Embedding API returned {resp.status_code}: {resp.text[:200]}")
 
         data = resp.json()
         try:
             result = data["data"][0]["embedding"]
         except (KeyError, IndexError) as exc:
-            raise EmbeddingError(
-                f"Unexpected OpenAI embedding response: {list(data.keys())}"
-            ) from exc
+            raise EmbeddingError(f"Unexpected OpenAI embedding response: {list(data.keys())}") from exc
 
         if self._dim is None:
             self._dim = len(result)
         return result
+
+    def _embed_openai(self, text: str) -> list[float]:
+        """OpenAI embedding — delegates to shared compatible method."""
+        api_key = self._resolve_api_key("openai")
+        base = self._cfg.get("base_url", "https://api.openai.com").rstrip("/")
+        endpoint = f"{base}/v1/embeddings"
+        model = self._cfg.get("model", "text-embedding-3-small")
+        return self._embed_openai_compatible(text, endpoint, api_key, model)
+
+    def _embed_voyage(self, text: str) -> list[float]:
+        """Voyage AI embedding — delegates to shared compatible method."""
+        api_key = self._resolve_api_key("voyage")
+        base = self._cfg.get("base_url", "https://api.voyageai.com").rstrip("/")
+        endpoint = f"{base}/v1/embeddings"
+        model = self._cfg.get("model", "voyage-3-large")
+        return self._embed_openai_compatible(text, endpoint, api_key, model)

@@ -35,7 +35,9 @@ Return ONLY valid JSON:
   "stability_score": 0.6
 }
 
-stability_score: 0.0 = chunking needs major rework, 1.0 = chunking is excellent and stable."""
+stability_score: 0.0 = chunking needs major rework, 1.0 = chunking is excellent and stable.
+
+Structural integrity (turn coverage, gaps, overlaps) is validated automatically and repaired before you see the chunks. Focus your evaluation on boundary quality, coherence, tag accuracy, and pattern matching."""
 
 REVIEW_USER_TEMPLATE = """Chunking pass {pass_number} results.
 
@@ -44,6 +46,9 @@ Discovery map context:
 
 Previous refinement feedback (accumulated):
 {prior_feedback}
+
+Structural validation (automated — do NOT re-evaluate these):
+{structural_summary}
 
 Sample chunks to review ({n_samples} of {total_chunks} total):
 {chunk_samples}
@@ -57,6 +62,7 @@ class ChunkRefinementState:
     def __init__(self):
         self._passes: list[dict] = []
         self._stability_scores: list[float] = []
+        self._structural_scores: list[float] = []
         self._feedback_accumulator: dict = {
             "boundary_issues": [],
             "coherence_issues": [],
@@ -74,11 +80,15 @@ class ChunkRefinementState:
     def stability_score(self) -> float:
         if not self._stability_scores:
             return 0.0
-        # EMA with alpha=0.4 — more recent passes weighted heavier
-        score = self._stability_scores[0]
+        # EMA with alpha=0.4 for quality scores
+        quality = self._stability_scores[0]
         for s in self._stability_scores[1:]:
-            score = 0.4 * s + 0.6 * score
-        return round(score, 4)
+            quality = 0.4 * s + 0.6 * quality
+        # Composite: blend structural and quality if structural data exists
+        if self._structural_scores:
+            structural = self._structural_scores[-1]
+            return round(0.5 * structural + 0.5 * quality, 4)
+        return round(quality, 4)
 
     @property
     def guidance(self) -> str:
@@ -97,6 +107,10 @@ class ChunkRefinementState:
         if self._guidance:
             parts.append(f"\n  Guidance: {self._guidance}")
         return "\n".join(parts) if parts else "(no actionable feedback yet)"
+
+    def apply_structural_score(self, score: float) -> None:
+        """Record a structural validation score for the current pass."""
+        self._structural_scores.append(score)
 
     def apply_review(self, review: dict) -> None:
         """Merge a review response into accumulated state."""
@@ -119,6 +133,8 @@ class ChunkRefinementState:
             "total_passes": self.pass_count,
             "stability_score": self.stability_score,
             "stability_history": self._stability_scores,
+            "structural_score": self._structural_scores[-1] if self._structural_scores else None,
+            "structural_history": self._structural_scores,
             "final_guidance": self._guidance,
             "accumulated_feedback": {
                 k: list(dict.fromkeys(v))[-8:]
@@ -251,16 +267,51 @@ def run_iterative_chunking(
 
         best_chunks = all_chunks
 
+        # Compute per-conversation structural scores
+        from bud.stages.chunk_validate import validate_chunks, compute_structural_score
+        chunks_by_conv: dict[str, list[dict]] = {}
+        for chunk in all_chunks:
+            conv_id = chunk["conversation_id"]
+            chunks_by_conv.setdefault(conv_id, []).append(chunk)
+
+        structural_scores = []
+        total_missing = 0
+        total_overlapping = 0
+        n_with_gaps = 0
+        n_with_overlaps = 0
+        for conv in conversations:
+            conv_chunks = chunks_by_conv.get(conv["id"], [])
+            validation = validate_chunks(conv_chunks, len(conv["turns"]))
+            structural_scores.append(compute_structural_score(validation))
+            if validation["missing_turns"]:
+                n_with_gaps += 1
+                total_missing += len(validation["missing_turns"])
+            if validation["overlapping_turns"]:
+                n_with_overlaps += 1
+                total_overlapping += len(validation["overlapping_turns"])
+
+        avg_structural = sum(structural_scores) / max(1, len(structural_scores))
+        state.apply_structural_score(avg_structural)
+
         # Last iteration: skip review — just use the chunks
         if pass_num == max_iterations:
             break
 
         # Review the chunks
-        sample = _sample_chunks(all_chunks, n=min(10, len(all_chunks)))
+        sample_n = min(30, max(10, len(all_chunks) // 20))
+        sample = _sample_chunks(all_chunks, n=min(sample_n, len(all_chunks)))
+        structural_summary = (
+            f"Structural score: {avg_structural:.2f}/1.00\n"
+            f"Conversations with gaps: {n_with_gaps}/{len(conversations)}\n"
+            f"Conversations with overlaps: {n_with_overlaps}/{len(conversations)}\n"
+            f"Total missing turns: {total_missing}\n"
+            f"Total overlapping turns: {total_overlapping}"
+        )
         review_prompt = REVIEW_USER_TEMPLATE.format(
             pass_number=pass_num,
             discovery_summary=discovery_summary,
             prior_feedback=state.to_feedback_summary(),
+            structural_summary=structural_summary,
             chunk_samples=_format_chunks_for_review(sample),
             n_samples=len(sample),
             total_chunks=len(all_chunks),

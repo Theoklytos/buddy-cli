@@ -276,3 +276,28 @@ class TestRunIterativeChunking:
         system_sent = call_args[1].get("system", call_args[0][0] if call_args[0] else "")
         assert "Archive Pattern Map" in system_sent
         assert "topic shift" in system_sent
+
+
+def test_composite_stability_with_structural_score():
+    state = ChunkRefinementState()
+    state.apply_review({"stability_score": 0.4, "feedback": {}, "refinement_guidance": ""})
+    state.apply_structural_score(0.9)
+    # Composite: 0.5 * 0.9 (structural) + 0.5 * 0.4 (quality EMA) = 0.65
+    assert abs(state.stability_score - 0.65) < 0.01
+
+
+def test_report_includes_structural_data():
+    state = ChunkRefinementState()
+    state.apply_review({"stability_score": 0.5, "feedback": {}, "refinement_guidance": ""})
+    state.apply_structural_score(0.8)
+    report = state.to_report()
+    assert "structural_score" in report
+    assert "structural_history" in report
+    assert report["structural_history"] == [0.8]
+
+
+def test_stability_without_structural_uses_quality_only():
+    state = ChunkRefinementState()
+    state.apply_review({"stability_score": 0.6, "feedback": {}, "refinement_guidance": ""})
+    # No structural score applied — should use quality EMA only
+    assert abs(state.stability_score - 0.6) < 0.01
