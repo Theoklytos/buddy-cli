@@ -1,11 +1,14 @@
 """Tests for bud.stages.embed."""
 
 import json
+import os
+import unittest
 from unittest.mock import MagicMock, patch, call
 
 import pytest
 
 from bud.lib.errors import EmbeddingError
+from bud.lib.embeddings import EmbeddingClient
 from bud.stages.embed import (
     embed_chunks,
     load_embed_queue,
@@ -347,3 +350,47 @@ def test_embedding_client_sets_dimension_after_first_embed():
         client.embed("test")
 
     assert client.dimension == 4
+
+
+# ---------------------------------------------------------------------------
+# _resolve_api_key tests
+# ---------------------------------------------------------------------------
+
+
+class TestResolveApiKey(unittest.TestCase):
+    """Tests for _resolve_api_key() — config > env var > error."""
+
+    def _make_config(self, **embed_overrides):
+        base = {"provider": "voyage", "model": "voyage-3-large", "base_url": "https://api.voyageai.com"}
+        base.update(embed_overrides)
+        return {"embeddings": base, "llm": {"timeout_seconds": 10}}
+
+    def test_returns_key_from_config(self):
+        client = EmbeddingClient(self._make_config(api_key="cfg-key-123"))
+        assert client._resolve_api_key("voyage") == "cfg-key-123"
+
+    def test_falls_back_to_env_var_voyage(self):
+        client = EmbeddingClient(self._make_config())
+        with patch.dict(os.environ, {"VOYAGE_API_KEY": "env-key-456"}):
+            assert client._resolve_api_key("voyage") == "env-key-456"
+
+    def test_falls_back_to_env_var_openai(self):
+        client = EmbeddingClient(self._make_config(provider="openai", model="text-embedding-3-small"))
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "env-key-789"}):
+            assert client._resolve_api_key("openai") == "env-key-789"
+
+    def test_raises_on_missing_key(self):
+        client = EmbeddingClient(self._make_config())
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("VOYAGE_API_KEY", None)
+            with self.assertRaises(ValueError) as ctx:
+                client._resolve_api_key("voyage")
+            assert "VOYAGE_API_KEY" in str(ctx.exception)
+
+    def test_ignores_none_string_api_key(self):
+        """The old bug: api_key defaulting to 'NONE' should not be treated as valid."""
+        client = EmbeddingClient(self._make_config(api_key="NONE", provider="openai", model="text-embedding-3-small"))
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("OPENAI_API_KEY", None)
+            with self.assertRaises(ValueError):
+                client._resolve_api_key("openai")

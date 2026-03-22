@@ -1,8 +1,15 @@
 """Embedding client for Bud RAG Pipeline."""
 
+import os
+
 import requests
 
 from bud.lib.errors import EmbeddingError
+
+_ENV_VAR_MAP = {
+    "voyage": "VOYAGE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
 
 
 class EmbeddingClient:
@@ -46,6 +53,27 @@ class EmbeddingClient:
     def dimension(self) -> int | None:
         """Return the embedding dimension (None until the first successful embed)."""
         return self._dim
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_api_key(self, provider: str) -> str:
+        """Resolve API key: config > env var > raise ValueError."""
+        cfg_key = self._cfg.get("api_key", "")
+        if cfg_key and cfg_key not in ("NONE", "none", ""):
+            return cfg_key
+
+        env_var = _ENV_VAR_MAP.get(provider, f"{provider.upper()}_API_KEY")
+        env_key = os.environ.get(env_var, "")
+        if env_key:
+            return env_key
+
+        raise ValueError(
+            f"No API key found for {provider}. "
+            f"Set it in config.yaml under embeddings.api_key "
+            f"or export {env_var}."
+        )
 
     # ------------------------------------------------------------------
     # Provider-specific helpers
