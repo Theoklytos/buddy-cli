@@ -221,6 +221,30 @@ def models_command(provider):
 
 
 @main.command()
+@click.option("--session-id", default=None, help="Custom session ID for logging")
+def mcp(session_id):
+    """Start the Bud MCP server (stdio mode).
+
+    The MCP server provides semantic search access to your conversation archive
+    and logs all tool calls to ~/mcp_logs/ for review.
+    """
+    from rich.console import Console
+    console = Console()
+
+    from bud.mcp_logger import start_logging_session
+    actual_session_id = start_logging_session(session_id)
+
+    console.print(f"[green]✓[/green] MCP server starting...")
+    console.print(f"[dim]Session ID: {actual_session_id}[/dim]")
+    console.print(f"[dim]Logs directory: ~/mcp_logs/[/dim]")
+    console.print(f"[dim]Press Ctrl+C to stop[/dim]\n")
+
+    # Import and run the MCP server
+    from bud.bud_mcp import main as mcp_main
+    mcp_main()
+
+
+@main.command()
 @click.option(
     "--data-dir", "-d",
     type=click.Path(exists=True, file_okay=False, resolve_path=True),

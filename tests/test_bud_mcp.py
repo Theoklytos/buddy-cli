@@ -592,5 +592,85 @@ class TestHelperFunctions:
         assert result["score"] == 0.1235
 
 
+class TestCliMcpCommand:
+    """Tests for the `bud mcp` CLI command."""
+
+    def test_mcp_command_help_output(self, tmp_path, monkeypatch):
+        """Test that the mcp command shows help."""
+        monkeypatch.setattr(mcp_module, 'SESSIONS_DIR', tmp_path / "mcp_logs")
+        monkeypatch.setattr(mcp_module, 'CURRENT_SESSION_FILE', tmp_path / "mcp_logs" / ".current_session")
+
+        from bud.cli import main
+        from click.testing import CliRunner
+        cli_runner = CliRunner()
+
+        result = cli_runner.invoke(main, ['mcp', '--help'])
+        assert result.exit_code == 0
+        assert "MCP server" in result.output or "mcp" in result.output.lower()
+
+    def test_mcp_command_initializes_logger(self, tmp_path, monkeypatch):
+        """Test that the mcp command initializes the logging session."""
+        monkeypatch.setattr(mcp_module, 'SESSIONS_DIR', tmp_path / "mcp_logs")
+        monkeypatch.setattr(mcp_module, 'CURRENT_SESSION_FILE', tmp_path / "mcp_logs" / ".current_session")
+
+        calls = []
+        original_start = mcp_module.start_logging_session
+
+        def track_start(sid=None):
+            calls.append(sid)
+            return "test-session-logger"
+
+        monkeypatch.setattr(mcp_module, 'start_logging_session', track_start)
+
+        # Mock mcp.run to prevent blocking
+        original_run = mcp_module.mcp.run
+        mcp_module.mcp.run = lambda: None
+
+        from bud.cli import main
+        from click.testing import CliRunner
+        cli_runner = CliRunner()
+
+        result = cli_runner.invoke(main, ['mcp'])
+        assert result.exit_code == 0
+        assert len(calls) == 1
+        assert calls[0] is None  # Default None session_id
+
+        # Restore
+        mcp_module.mcp.run = original_run
+        monkeypatch.setattr(mcp_module, 'start_logging_session', original_start)
+
+    def test_mcp_command_with_custom_session_id(self, tmp_path, monkeypatch):
+        """Test that the mcp command accepts a custom session ID."""
+        monkeypatch.setattr(mcp_module, 'SESSIONS_DIR', tmp_path / "mcp_logs")
+        monkeypatch.setattr(mcp_module, 'CURRENT_SESSION_FILE', tmp_path / "mcp_logs" / ".current_session")
+
+        # Need to patch the import path used in cli.py: bud.mcp_logger.start_logging_session
+        import bud.mcp_logger as logger_module
+        calls = []
+        original_start = logger_module.start_logging_session
+
+        def track_start(sid=None):
+            calls.append(sid)
+            return "custom-session-id"
+
+        monkeypatch.setattr(logger_module, 'start_logging_session', track_start)
+
+        # Mock mcp.run to prevent blocking
+        original_run = mcp_module.mcp.run
+        mcp_module.mcp.run = lambda: None
+
+        from bud.cli import main
+        from click.testing import CliRunner
+        cli_runner = CliRunner()
+
+        result = cli_runner.invoke(main, ['mcp', '--session-id', 'my-session-123'])
+        assert result.exit_code == 0
+        assert len(calls) == 1
+        assert calls[0] == "my-session-123"
+
+        mcp_module.mcp.run = original_run
+        monkeypatch.setattr(logger_module, 'start_logging_session', original_start)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
