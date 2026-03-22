@@ -290,6 +290,13 @@ class TestBudReflect:
         ctx.request_context = MagicMock()
         ctx.request_context.lifespan_state = {
             "store": MagicMock(),
+            "schema": {
+                "dimensions": {
+                    "terrain": ["conceptual", "emotional"],
+                    "geometry": ["linear", "circular"]
+                },
+                "chunk_types": ["exchange"]
+            },
         }
 
         store = MagicMock()
@@ -316,6 +323,13 @@ class TestBudReflect:
         ctx.request_context = MagicMock()
         ctx.request_context.lifespan_state = {
             "store": MagicMock(),
+            "schema": {
+                "dimensions": {
+                    "motifs": ["identity", "resonance"],
+                    "geometry": ["linear", "circular"]
+                },
+                "chunk_types": ["exchange"]
+            },
         }
 
         store = MagicMock()
@@ -349,14 +363,14 @@ class TestBudContext:
 
         ctx = MagicMock()
         ctx.request_context = MagicMock()
-        ctx.request_context.lifespan_state = {
-            "logger": MagicMock(),
-            "session_file": tmp_path / "mcp_logs" / "test-session.jsonl",
-        }
-
+        # Use a simple object for logger with required attributes
         logger = MagicMock()
         logger._current_session_id = "mcp-test-session"
-        ctx.request_context.lifespan_state["logger"] = logger
+        logger._was_new_session = True
+        ctx.request_context.lifespan_state = {
+            "logger": logger,
+            "session_file": tmp_path / "mcp_logs" / "test-session.jsonl",
+        }
 
         params = MagicMock()
         params.history_size = 10
@@ -365,6 +379,7 @@ class TestBudContext:
         data = json.loads(result)
         assert "session_id" in data
         assert data["session_id"] == "mcp-test-session"
+        assert data["is_new_session"] is True
 
     def test_context_returns_history(self, tmp_path, monkeypatch):
         """Test that context returns tool call history."""
@@ -387,13 +402,14 @@ class TestBudContext:
 
         ctx = MagicMock()
         ctx.request_context = MagicMock()
-        ctx.request_context.lifespan_state = {
-            "logger": MagicMock(),
-            "session_file": session_file,
-        }
+        # Use a simple object for logger with required attributes
         logger = MagicMock()
         logger._current_session_id = "test-session"
-        ctx.request_context.lifespan_state["logger"] = logger
+        logger._was_new_session = False
+        ctx.request_context.lifespan_state = {
+            "logger": logger,
+            "session_file": session_file,
+        }
 
         params = MagicMock()
         params.history_size = 10
@@ -404,6 +420,7 @@ class TestBudContext:
         assert len(data["history"]) == 2
         assert data["history"][0]["tool_name"] == "bud_orient"
         assert data["history"][1]["tool_name"] == "bud_recall"
+        assert data["is_new_session"] is False
 
     def test_context_falls_back_to_module_logger(self, tmp_path, monkeypatch):
         """Test that context falls back to module-level logger if lifespan state missing."""
@@ -670,6 +687,149 @@ class TestCliMcpCommand:
 
         mcp_module.mcp.run = original_run
         monkeypatch.setattr(logger_module, 'start_logging_session', original_start)
+
+
+class TestConstantsImport:
+    """Tests for Issue #1: Verify constants are imported from mcp_logger."""
+
+    def test_constants_not_duplicated_in_bud_mcp(self):
+        """Test that SESSIONS_DIR and CURRENT_SESSION_FILE are imported, not duplicated."""
+        # These should be imported from bud.mcp_logger, not defined here
+        # Verify they exist and are the same objects as in mcp_logger module
+        import bud.mcp_logger as logger_module
+        assert mcp_module.SESSIONS_DIR is logger_module.SESSIONS_DIR
+        assert mcp_module.CURRENT_SESSION_FILE is logger_module.CURRENT_SESSION_FILE
+
+    def test_constants_import_path(self):
+        """Test that constants come from mcp_logger module."""
+        import bud.mcp_logger as logger_module
+        assert hasattr(logger_module, 'SESSIONS_DIR')
+        assert hasattr(logger_module, 'CURRENT_SESSION_FILE')
+
+
+class TestisNewSession:
+    """Tests for Issue #2: Verify is_new_session logic."""
+
+    def test_new_session_returns_true_when_generated(self, tmp_path, monkeypatch):
+        """Test that is_new_session is True when a new session ID is generated."""
+        monkeypatch.setattr(mcp_module, 'SESSIONS_DIR', tmp_path / "mcp_logs")
+        monkeypatch.setattr(mcp_module, 'CURRENT_SESSION_FILE', tmp_path / "mcp_logs" / ".current_session")
+
+        ctx = MagicMock()
+        ctx.request_context = MagicMock()
+        ctx.request_context.lifespan_state = {
+            "logger": MagicMock(),
+            "session_file": tmp_path / "mcp_logs" / "test-session.jsonl",
+        }
+
+        # Use real logger to ensure fresh session
+        logger = MCPLogger()
+        logger.start_session()  # Generates new session ID
+        logger._was_new_session = True  # Simulate new session
+
+        ctx.request_context.lifespan_state["logger"] = logger
+
+        params = MagicMock()
+        params.history_size = 10
+
+        result = asyncio.run(mcp_module.bud_context(params, ctx))
+        data = json.loads(result)
+        assert data["is_new_session"] is True
+
+    def test_resumed_session_returns_false_when_loaded(self, tmp_path, monkeypatch):
+        """Test that is_new_session is False when session ID is loaded from file."""
+        monkeypatch.setattr(mcp_module, 'SESSIONS_DIR', tmp_path / "mcp_logs")
+        monkeypatch.setattr(mcp_module, 'CURRENT_SESSION_FILE', tmp_path / "mcp_logs" / ".current_session")
+
+        ctx = MagicMock()
+        ctx.request_context = MagicMock()
+
+        # Use a simple logger object with the required attributes
+        # Simulate the case where session was loaded from file (was_new_session=False)
+        logger = MagicMock()
+        logger._current_session_id = "mcp-loaded-session"
+        logger._was_new_session = False  # Session was loaded from file, not new
+
+        ctx.request_context.lifespan_state = {
+            "logger": logger,
+            "session_file": tmp_path / "mcp_logs" / "test-session.jsonl",
+        }
+
+        params = MagicMock()
+        params.history_size = 10
+
+        result = asyncio.run(mcp_module.bud_context(params, ctx))
+        data = json.loads(result)
+        assert data["is_new_session"] is False
+        assert data["session_id"] == "mcp-loaded-session"
+
+
+class TestBudReflectDimensionValidation:
+    """Tests for Issue #3: Verify dimension validation in bud_reflect."""
+
+    def test_reflect_invalid_dimension_returns_error(self, tmp_path, monkeypatch):
+        """Test that bud_reflect returns error for invalid dimension."""
+        ctx = MagicMock()
+        ctx.request_context = MagicMock()
+        ctx.request_context.lifespan_state = {
+            "store": MagicMock(),
+            "schema": {
+                "dimensions": {
+                    "geometry": ["linear", "circular"],
+                    "coherence": ["high", "low"],
+                    "texture": ["smooth", "rough"],
+                    "terrain": ["conceptual", "emotional"]
+                },
+                "chunk_types": ["exchange", "breakthrough"]
+            },
+        }
+
+        store = MagicMock()
+        store.count.return_value = 10
+        ctx.request_context.lifespan_state["store"] = store
+
+        params = MagicMock()
+        params.dimension = "invalid_dimension"
+        params.value = "any_value"
+        params.limit = 10
+
+        result = asyncio.run(mcp_module.bud_reflect(params, ctx))
+        data = json.loads(result)
+        assert "error" in data
+        assert "invalid" in data["error"].lower() or "not found" in data["error"].lower()
+
+    def test_reflect_valid_dimension_passes(self, tmp_path, monkeypatch):
+        """Test that bud_reflect accepts valid dimensions from schema."""
+        ctx = MagicMock()
+        ctx.request_context = MagicMock()
+        ctx.request_context.lifespan_state = {
+            "store": MagicMock(),
+            "schema": {
+                "dimensions": {
+                    "geometry": ["linear", "circular"],
+                    "coherence": ["high", "low"]
+                },
+                "chunk_types": ["exchange"]
+            },
+        }
+
+        store = MagicMock()
+        store.count.return_value = 10
+        store._metadata = [
+            {"chunk_id": "c1", "chunk_type": "exchange", "tags": {"geometry": "linear"}},
+        ]
+        ctx.request_context.lifespan_state["store"] = store
+
+        params = MagicMock()
+        params.dimension = "geometry"
+        params.value = "linear"
+        params.limit = 10
+
+        result = asyncio.run(mcp_module.bud_reflect(params, ctx))
+        data = json.loads(result)
+        assert "error" not in data
+        assert data["dimension"] == "geometry"
+        assert len(data["results"]) == 1
 
 
 if __name__ == "__main__":

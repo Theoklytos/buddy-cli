@@ -19,6 +19,7 @@ class MCPLogger:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         self._current_session_id: Optional[str] = None
         self._session_file: Optional[Path] = None
+        self._was_new_session: bool = False
 
     def start_session(self, session_id: Optional[str] = None) -> str:
         """Start or resume a logging session.
@@ -30,6 +31,9 @@ class MCPLogger:
         Returns:
             The session ID being used.
         """
+        # Track if this is a new session (generated fresh)
+        was_new_session = False
+
         if session_id is None:
             # Try to resume from .current_session
             if CURRENT_SESSION_FILE.exists():
@@ -40,6 +44,7 @@ class MCPLogger:
 
         if session_id is None:
             session_id = f"mcp-{uuid.uuid4().hex[:12]}"
+            was_new_session = True
 
         self._current_session_id = session_id
         self._session_file = SESSIONS_DIR / f"{session_id}.jsonl"
@@ -51,6 +56,7 @@ class MCPLogger:
         if not self._session_file.exists():
             self._session_file.touch()
 
+        self._was_new_session = was_new_session
         return session_id
 
     def log_tool_call(

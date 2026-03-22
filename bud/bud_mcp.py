@@ -35,9 +35,8 @@ MAX_K = 20
 ORIENT_SAMPLE_SIZE = 12
 ORIENT_PREVIEW_CHARS = 200
 
-# Export SESSIONS_DIR for tests
-SESSIONS_DIR = Path.home() / "mcp_logs"
-CURRENT_SESSION_FILE = SESSIONS_DIR / ".current_session"
+# Import SESSIONS_DIR and CURRENT_SESSION_FILE from mcp_logger
+from bud.mcp_logger import SESSIONS_DIR, CURRENT_SESSION_FILE
 
 
 # Lifespan - loads index on first access, keeps warm for session
@@ -62,11 +61,9 @@ async def bud_lifespan():
     schema = schema_mgr.load()
 
     # Initialize MCP logger with session
-    SESSIONS_DIR = Path.home() / "mcp_logs"
-    CURRENT_SESSION_FILE = SESSIONS_DIR / ".current_session"
     logger = MCPLogger()
     session_id = logger.start_session()  # Start/resume session
-    session_file = SESSIONS_DIR / f"{session_id}.jsonl"
+    session_file = CURRENT_SESSION_FILE.parent / f"{session_id}.jsonl"
 
     yield {
         "store": store,
@@ -217,9 +214,21 @@ async def bud_reflect(params: ReflectInput, ctx) -> str:
         result = _error("Index is empty. Run 'bud process' first.")
         return result
 
-    start_time = time.perf_counter()
+    # Get schema from state for dimension validation
+    schema: dict = state.get("schema", {})
+    valid_dimensions = set(schema.get("dimensions", {}).keys())
+    # chunk_type is a special case - it's not in dimensions but is valid
+    valid_dimensions.add("chunk_type")
 
     dim = params.dimension.lower().strip()
+
+    # Validate dimension against schema
+    if dim not in valid_dimensions:
+        result = _error(f"Invalid dimension '{params.dimension}'. Valid dimensions are: {', '.join(sorted(valid_dimensions))}")
+        return result
+
+    start_time = time.perf_counter()
+
     val = params.value.lower().strip()
 
     matched = []
@@ -337,9 +346,12 @@ async def bud_context(params: ContextInput, ctx) -> str:
 
     total_calls = len(history)
 
+    # Use _was_new_session from logger if available, otherwise check if session file existed before
+    is_new_session = getattr(logger, '_was_new_session', False)
+
     return json.dumps({
         "session_id": session_id,
-        "is_new_session": False,  # Session ID was persisted
+        "is_new_session": is_new_session,
         "history": history,
         "total_calls_in_session": total_calls,
     }, indent=2)
