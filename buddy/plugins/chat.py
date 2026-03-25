@@ -22,6 +22,11 @@ class ChatPlugin(Plugin):
     def setup(self, session) -> None:
         self.session = session
         api_key = resolve_api_key(session.config)
+        if not api_key:
+            raise RuntimeError(
+                "No Anthropic API key found. Set it in buddy.yaml, "
+                "ANTHROPIC_API_KEY env var, or bud's config.yaml under llm.api_key."
+            )
         self.client = anthropic.Anthropic(api_key=api_key)
 
     def on_event(self, event: Event) -> None:
@@ -85,6 +90,7 @@ class ChatPlugin(Plugin):
             EventType.ASSISTANT_MESSAGE,
             {
                 "text": accumulated,
+                "model": self.session.model,
                 "usage": raw_response.get("usage", {}),
                 "raw_response": raw_response,
             },

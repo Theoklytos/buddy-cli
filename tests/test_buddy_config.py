@@ -220,7 +220,9 @@ def test_run_config_wizard_saves_config(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "BUD_CONFIG_FILE", tmp_path / "no_bud_config.yaml")
 
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     inputs = iter([
+        "sk-test-key",                   # API key
         "claude-sonnet-4-20250514",   # model
         "You are a helpful assistant.",  # system prompt
         "",                              # temperature (blank = None)

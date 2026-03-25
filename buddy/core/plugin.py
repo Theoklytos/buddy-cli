@@ -52,6 +52,12 @@ class PluginRegistry:
     def get_all_commands(self) -> dict[str, tuple[Plugin, str]]:
         return dict(self._commands)
 
+    def get_plugins(self) -> list[Plugin]:
+        return list(self._plugins)
+
+    def get_plugin_by_type(self, cls: type) -> Plugin | None:
+        return next((p for p in self._plugins if isinstance(p, cls)), None)
+
     def broadcast(self, event: Any) -> None:
         for plugin in self._plugins:
             plugin.on_event(event)

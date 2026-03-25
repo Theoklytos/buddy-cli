@@ -138,6 +138,16 @@ def run_config_wizard() -> dict:
         except (yaml.YAMLError, OSError):
             pass
 
+    # API key (if not already found)
+    if not imported_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        api_key_input = Prompt.ask(
+            "Anthropic API key (or set ANTHROPIC_API_KEY env var)",
+            default="",
+            console=console,
+        )
+        if api_key_input.strip():
+            config["api_key"] = api_key_input.strip()
+
     # Model
     model = Prompt.ask(
         "Model",

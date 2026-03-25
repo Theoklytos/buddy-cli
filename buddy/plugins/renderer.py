@@ -63,7 +63,11 @@ class RendererPlugin(Plugin):
                 self.console.print(result)
 
         elif event.type == EventType.ERROR:
-            message = event.payload.get("message", str(event.payload))
+            if self._stream_start is not None:
+                print()  # end any in-progress stream
+                self._stream_start = None
+            error = event.payload.get("error", event.payload.get("message", ""))
+            message = str(error) if error else str(event.payload)
             self.console.print(
                 Panel(message, border_style="red", title="Error")
             )

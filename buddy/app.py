@@ -47,7 +47,7 @@ def main() -> None:
     # 5. Wire event bus — subscribe all plugins to receive events through the bus.
     # This ensures that when event_bus.emit() is called from anywhere (main loop or
     # from inside a plugin like ChatPlugin), all plugins receive the event.
-    for plugin in registry._plugins:
+    for plugin in registry.get_plugins():
         for event_type in EventType:
             event_bus.subscribe(event_type, plugin.on_event)
 
@@ -55,7 +55,7 @@ def main() -> None:
     event_bus.emit(Event(EventType.SESSION_START))
 
     # 7. Main loop
-    input_plugin = next(p for p in registry._plugins if isinstance(p, InputPlugin))
+    input_plugin = registry.get_plugin_by_type(InputPlugin)
     try:
         while True:
             text = input_plugin.get_input()

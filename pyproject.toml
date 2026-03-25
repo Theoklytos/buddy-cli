@@ -14,11 +14,14 @@ dependencies = [
     "faiss-cpu>=1.7",
     "numpy>=1.24",
     "mcp>=1.1.0",
+    "prompt-toolkit>=3.0",
+    "anthropic>=0.86.0",
 ]
 
 [project.scripts]
 bud = "bud.cli:main"
 bud-mcp = "bud.bud_mcp:main"
+buddy = "buddy.app:main"
 
 [project.optional-dependencies]
 dev = [
@@ -27,7 +30,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["bud"]
+packages = ["bud", "buddy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
